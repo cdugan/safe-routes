@@ -1,0 +1,5 @@
+Add data from:
+- Accident database - roads with higher density (accidents per daily traffic) of accidents are more dangerous. 
+- Forest database - forested roads are darker and more dangerous
+- Include "links"in highway classification to capture on/off ramps, etc.
+? Should we pair the curvature rating with a high speed rating?

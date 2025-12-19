@@ -1,0 +1,611 @@
+"""
+LitRoutes Web Application
+
+A Flask-based web server for visualizing and comparing fastest vs safest driving routes.
+Uses the existing graph_builder and route_visualizer logic adapted for web delivery.
+"""
+
+from flask import Flask, render_template, jsonify, request
+import time
+from flask_cors import CORS
+import json
+import os
+
+# Lazy imports - import heavy dependencies only when needed
+def get_nx():
+    import networkx as nx
+    return nx
+
+def get_graph_builder():
+    from graph_builder import build_safe_graph
+    return build_safe_graph
+
+def get_data_fetcher():
+    from data_fetcher import fetch_duke_lights
+    return fetch_duke_lights
+
+def get_route_visualizer():
+    from route_visualizer import (
+        geocode_address, snap_to_nearest_node, get_osrm_route, 
+        snap_osrm_route_to_graph
+    )
+    return geocode_address, snap_to_nearest_node, get_osrm_route, snap_osrm_route_to_graph
+
+# BBOX for default area
+# BBOX for default area (centralized in config)
+from config import BBOX
+
+app = Flask(__name__, static_folder='web/static', template_folder='web/templates')
+CORS(app)
+
+# Global graph cache to avoid rebuilding
+_graph_cache = {}
+
+def get_or_build_graph(bbox, build_safe_graph_func):
+    """Get cached graph or build new one."""
+    bbox_key = str(bbox)
+    if bbox_key not in _graph_cache:
+        print(f"[graph] cache miss — Building graph for {bbox}...")
+        start = time.time()
+        G, lights = build_safe_graph_func(bbox)
+        elapsed = time.time() - start
+        print(f"[graph] built in {elapsed:.2f}s — nodes={len(G.nodes())} edges={len(G.edges())} lights={len(lights) if lights else 0}")
+        _graph_cache[bbox_key] = (G, lights)
+    return _graph_cache[bbox_key]
+
+
+def graph_to_geojson(G):
+    """Convert NetworkX graph to GeoJSON for map visualization."""
+    features = []
+    
+    # Add edges as LineString features
+    for u, v, k, data in G.edges(keys=True, data=True):
+        try:
+            # Prefer edge geometry when available so roads follow curves
+            geom = data.get('geometry')
+            if geom is not None:
+                try:
+                    coords = [[float(x), float(y)] for x, y in geom.coords]
+                except Exception:
+                    # Some geometries may be MultiLineString; fallback to node endpoints
+                    u_lat, u_lon = G.nodes[u]['y'], G.nodes[u]['x']
+                    v_lat, v_lon = G.nodes[v]['y'], G.nodes[v]['x']
+                    coords = [[u_lon, u_lat], [v_lon, v_lat]]
+            else:
+                u_lat, u_lon = G.nodes[u]['y'], G.nodes[u]['x']
+                v_lat, v_lon = G.nodes[v]['y'], G.nodes[v]['x']
+                coords = [[u_lon, u_lat], [v_lon, v_lat]]
+
+            length_val = data.get('length', 0)
+            safety_val = data.get('safety_score', 100)
+            safety_per_len = (safety_val / length_val) if length_val else None
+
+            features.append({
+                "type": "Feature",
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": coords
+                },
+                "properties": {
+                    "safety_score": safety_val,
+                    "light_count": data.get('light_count', 0),
+                    "curve_score": data.get('curve_score', 0),
+                    "darkness_score": data.get('darkness_score', 0),
+                    "highway_risk": data.get('highway_risk', 1),
+                    "highway_tag": data.get('highway_tag', None),
+                    "land_risk": data.get('land_risk', 0.6),
+                    "land_label": data.get('land_label', 'Unknown'),
+                    "safety_per_length": safety_per_len,
+                    "travel_time": data.get('travel_time', 0),
+                    "length": length_val,
+                    "speed_kph": data.get('speed_kph', 40),
+                    "name": data.get('name', 'Unknown')
+                }
+            })
+        except Exception as e:
+            print(f"Error processing edge {u}-{v}: {e}")
+            continue
+    
+    return {
+        "type": "FeatureCollection",
+        "features": features
+    }
+
+
+def route_to_geojson(route_nodes, G, route_type="fastest"):
+    """Convert a route (list of node IDs) to GeoJSON."""
+    if not route_nodes or len(route_nodes) < 2:
+        return None
+    
+    coords = []
+    properties = {
+        "type": route_type,
+        "length": 0,
+        "travel_time": 0,
+        "safety_score": 0
+    }
+    
+    try:
+        # Build route coordinates by concatenating edge geometries when available
+        for i in range(len(route_nodes) - 1):
+            u, v = route_nodes[i], route_nodes[i + 1]
+            edge_data = G.edges[u, v, 0]
+            properties["length"] += edge_data.get('length', 0)
+            properties["travel_time"] += edge_data.get('travel_time', 0)
+            properties["safety_score"] += edge_data.get('safety_score', 100)
+
+            geom = edge_data.get('geometry')
+            if geom is not None:
+                try:
+                    pts = [[float(x), float(y)] for x, y in geom.coords]
+                except Exception:
+                    # fallback to node coordinates
+                    pts = [[G.nodes[u]['x'], G.nodes[u]['y']], [G.nodes[v]['x'], G.nodes[v]['y']]]
+            else:
+                pts = [[G.nodes[u]['x'], G.nodes[u]['y']], [G.nodes[v]['x'], G.nodes[v]['y']]]
+
+            # Append points, avoiding duplicates
+            if not coords:
+                coords.extend(pts)
+            else:
+                # If last coord equals first of pts, skip it
+                if coords[-1] == pts[0]:
+                    coords.extend(pts[1:])
+                else:
+                    coords.extend(pts)
+    except Exception as e:
+        print(f"Error building route GeoJSON: {e}")
+        return None
+    
+    return {
+        "type": "Feature",
+        "geometry": {
+            "type": "LineString",
+            "coordinates": coords
+        },
+        "properties": properties
+    }
+
+
+@app.route('/')
+def index():
+    """Serve the main web interface."""
+    return render_template('index.html', bbox=BBOX)
+
+
+@app.route('/api/graph-data', methods=['GET'])
+def api_graph_data():
+    """Get the road network graph as GeoJSON."""
+    try:
+        t0 = time.time()
+        print('[api] /api/graph-data request received')
+        # Lazy load dependencies
+        build_safe_graph = get_graph_builder()
+
+        G, lights = get_or_build_graph(BBOX, build_safe_graph)
+
+        # Build response with graph edges, lights, and bbox
+        edges_fc = graph_to_geojson(G)
+        lights_list = [{"lat": lat, "lon": lon} for lat, lon in lights] if lights else []
+        response = {
+            "bbox": list(BBOX),  # (north, south, east, west)
+            "edges": edges_fc,
+            "lights": lights_list,
+            "status": "success"
+        }
+
+        # log size and timing
+        try:
+            payload = json.dumps(response)
+            size = len(payload)
+        except Exception:
+            size = None
+        elapsed = time.time() - t0
+        print(f"[api] /api/graph-data ready — edges={len(edges_fc.get('features',[]))} bytes={size} time_s={elapsed:.2f}")
+        return jsonify(response)
+    except Exception as e:
+        print(f"[api] /api/graph-data error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route('/api/graph-data-lite', methods=['GET'])
+def api_graph_data_lite():
+    """Return a trimmed/sampled GeoJSON to allow fast client-side loading.
+
+    This reduces coordinate precision, drops unused properties, and samples edges.
+    """
+    try:
+        print('[api] /api/graph-data-lite request received')
+        build_safe_graph = get_graph_builder()
+        G, lights = get_or_build_graph(BBOX, build_safe_graph)
+
+        # sample edges: take every Nth edge to keep payload small
+        total_edges = len(list(G.edges(keys=True)))
+        sample_interval = max(1, total_edges // 1000)  # aim for ~1000 edges
+
+        features = []
+        i = 0
+        for u, v, k, data in G.edges(keys=True, data=True):
+            if (i % sample_interval) != 0:
+                i += 1
+                continue
+            geom = data.get('geometry')
+            if geom is not None:
+                try:
+                    coords = [[round(float(x), 5), round(float(y), 5)] for x, y in geom.coords]
+                except Exception:
+                    coords = [[round(G.nodes[u]['x'], 5), round(G.nodes[u]['y'], 5)], [round(G.nodes[v]['x'], 5), round(G.nodes[v]['y'], 5)]]
+            else:
+                coords = [[round(G.nodes[u]['x'], 5), round(G.nodes[u]['y'], 5)], [round(G.nodes[v]['x'], 5), round(G.nodes[v]['y'], 5)]]
+
+            length_val = data.get('length', 0)
+            safety_val = data.get('safety_score', 100)
+            safety_per_len = (safety_val / length_val) if length_val else None
+
+            features.append({
+                'type': 'Feature',
+                'geometry': {'type': 'LineString', 'coordinates': coords},
+                'properties': {
+                    'safety_score': safety_val,
+                    'light_count': data.get('light_count', 0),
+                    'curve_score': data.get('curve_score', 0),
+                    'darkness_score': data.get('darkness_score', 0),
+                    'highway_risk': data.get('highway_risk', 1),
+                    'highway_tag': data.get('highway_tag', None),
+                    'land_risk': data.get('land_risk', 0.6),
+                    'land_label': data.get('land_label', 'Unknown'),
+                    'safety_per_length': safety_per_len
+                }
+            })
+            i += 1
+
+        response = {'type': 'FeatureCollection', 'features': features}
+        print(f"[api] /api/graph-data-lite ready — features={len(features)} sampled_from={total_edges}")
+        return jsonify({'status': 'success', 'edges': response, 'lights': [{"lat": lat, "lon": lon} for lat, lon in lights] if lights else []})
+    except Exception as e:
+        print(f"[api] /api/graph-data-lite error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/graph-summary', methods=['GET'])
+def api_graph_summary():
+    """Return a lightweight summary of the graph (counts and small preview).
+
+    This is intended for quick client-side load to avoid large GeoJSON downloads.
+    """
+    try:
+        print('[api] /api/graph-summary request received')
+        build_safe_graph = get_graph_builder()
+
+        bbox_key = str(BBOX)
+        # If graph isn't built yet, start background build and return quickly
+        if bbox_key not in _graph_cache:
+            import threading
+            print('[api] graph not cached — starting background build')
+            t = threading.Thread(target=get_or_build_graph, args=(BBOX, build_safe_graph), daemon=True)
+            t.start()
+            return jsonify({'status': 'building', 'message': 'Graph build started in background; retry /api/graph-summary in a few seconds'})
+
+        G, lights = _graph_cache[bbox_key]
+
+        # prepare a small preview of edges (no geometry), up to 50 entries
+        preview = []
+        max_preview = 50
+        for i, (u, v, k, data) in enumerate(G.edges(keys=True, data=True)):
+            if i >= max_preview:
+                break
+            # try to include simple ints for nodes; fallback to string if not castable
+            try:
+                u_id = int(u)
+            except Exception:
+                u_id = str(u)
+            try:
+                v_id = int(v)
+            except Exception:
+                v_id = str(v)
+            preview.append({
+                'u': u_id, 'v': v_id,
+                'length': data.get('length', 0),
+                'safety_score': data.get('safety_score', 100),
+                'light_count': data.get('light_count', 0)
+            })
+
+        response = {
+            'status': 'success',
+            'bbox': list(BBOX),
+            'nodes': len(G.nodes()),
+            'edges': len(G.edges()),
+            'lights': len(lights) if lights else 0,
+            'preview_edges': preview
+        }
+        print(f"[api] /api/graph-summary ready — nodes={response['nodes']} edges={response['edges']} lights={response['lights']}")
+        return jsonify(response)
+    except Exception as e:
+        print(f"[api] /api/graph-summary error: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/api/routes', methods=['POST'])
+def api_routes():
+    """Compute and return fastest vs safest routes."""
+    try:
+        # Lazy load heavy dependencies
+        nx = get_nx()
+        build_safe_graph = get_graph_builder()
+        geocode_address, snap_to_nearest_node, get_osrm_route, snap_osrm_route_to_graph = get_route_visualizer()
+        
+        data = request.get_json()
+        start_input = data.get('start')
+        end_input = data.get('end')
+        
+        if not start_input or not end_input:
+            return jsonify({"status": "error", "message": "Missing start or end location"}), 400
+        
+        # Parse coordinates if they're provided as [lat, lon]
+        if isinstance(start_input, list) and len(start_input) == 2:
+            start_lat, start_lon = start_input
+        elif isinstance(start_input, str):
+            print(f"Geocoding start: {start_input}")
+            start_lat, start_lon = geocode_address(start_input)
+        else:
+            return jsonify({"status": "error", "message": "Invalid start format"}), 400
+        
+        if isinstance(end_input, list) and len(end_input) == 2:
+            end_lat, end_lon = end_input
+        elif isinstance(end_input, str):
+            print(f"Geocoding end: {end_input}")
+            end_lat, end_lon = geocode_address(end_input)
+        else:
+            return jsonify({"status": "error", "message": "Invalid end format"}), 400
+        
+        # Get graph
+        G, lights = get_or_build_graph(BBOX, build_safe_graph)
+        
+        # Snap to nearest nodes
+        print(f"Snapping ({start_lat}, {start_lon}) and ({end_lat}, {end_lon}) to graph...")
+        start_node = snap_to_nearest_node(G, start_lat, start_lon)
+        end_node = snap_to_nearest_node(G, end_lat, end_lon)
+        
+        print(f"Start node: {start_node}, End node: {end_node}")
+        
+        # Compute fastest route (try OSRM first)
+        fastest_route = None
+        fastest_data = {
+            "nodes": [],
+            "distance_m": 0,
+            "travel_time_s": 0,
+            "avg_speed_kmh": 0
+        }
+        
+        # Extract safety_alpha from request
+        safety_alpha = 0.5
+        try:
+            safety_alpha = float(data.get('safety_alpha', safety_alpha))
+        except Exception:
+            safety_alpha = 0.5
+        
+        # Initialize safest_data structure
+        safest_data = {
+            "nodes": [],
+            "distance_m": 0,
+            "travel_time_s": 0,
+            "safety_score": 0,
+            "alpha": safety_alpha
+        }
+        
+        print("Computing fastest route...")
+        osrm_result = get_osrm_route(start_lat, start_lon, end_lat, end_lon)
+        
+        if osrm_result:
+            route_coords, osrm_distance, osrm_duration = osrm_result
+            fastest_route = snap_osrm_route_to_graph(G, route_coords)
+            
+            if fastest_route:
+                fastest_data["nodes"] = fastest_route
+                fastest_data["distance_m"] = sum(
+                    G.edges[fastest_route[i], fastest_route[i+1], 0].get('length', 0)
+                    for i in range(len(fastest_route) - 1)
+                )
+                fastest_data["travel_time_s"] = sum(
+                    G.edges[fastest_route[i], fastest_route[i+1], 0].get('travel_time', 0)
+                    for i in range(len(fastest_route) - 1)
+                )
+                if fastest_data["travel_time_s"] > 0:
+                    fastest_data["avg_speed_kmh"] = (fastest_data["distance_m"] / fastest_data["travel_time_s"]) * 3.6
+                # Aggregate safety score for fastest route as well
+                fastest_data["safety_score"] = sum(
+                    (
+                        G.edges[fastest_route[i], fastest_route[i+1], 0].get('safety_score', 100)
+                        * (G.edges[fastest_route[i], fastest_route[i+1], 0].get('length', 1) / 1000.0)
+                    )
+                    for i in range(len(fastest_route) - 1)
+                )
+        
+        # Compute fastest and safest routes using unified weight function
+        # When safety_alpha=0, safest will match fastest (pure time optimization)
+        # When safety_alpha=1, only safety matters (ignores time)
+        
+        # Helper: normalize edge data from MultiGraph (may be nested dict) to flat dict
+        def normalize_edge_data(data_attr):
+            """Handle both flat dict and nested MultiGraph dict formats."""
+            if isinstance(data_attr, dict):
+                # Check if it's nested (has integer keys like 0, 1, ...)
+                first_key = next(iter(data_attr), None)
+                if isinstance(first_key, int) and isinstance(data_attr.get(first_key), dict):
+                    # Nested: extract first edge
+                    return data_attr[first_key]
+                elif 'osmid' in data_attr or 'length' in data_attr:
+                    # Already flat
+                    return data_attr
+            return {}
+        
+        print(f"Computing routes with safety_alpha={safety_alpha}...")
+        fastest_route = None # TESTING
+        try:
+            # If OSRM didn't provide a fastest route, compute it with NetworkX
+            if not fastest_route:
+                # Precompute normalization factors for consistent weighting across both route types
+                times = [d.get('travel_time', 0) for u, v, k, d in G.edges(keys=True, data=True)]
+                lengths = [d.get('length', 1) for u, v, k, d in G.edges(keys=True, data=True)]
+                safeties = [d.get('safety_score', 100) for u, v, k, d in G.edges(keys=True, data=True)]
+                max_time = max(times) if times else 1.0
+                max_length = max(lengths) if lengths else 1.0
+                max_safety = max(safeties) if safeties else 100.0
+                
+                print(f"  max_time={max_time:.1f}s, max_length={max_length:.0f}m, max_safety={max_safety:.1f}")
+
+                def fastest_weight(u, v, data_attr):
+                    data = normalize_edge_data(data_attr)
+                    t = (data.get('travel_time', 0) / max_time) if max_time > 0 else 0
+                    return t  # Pure time, no safety component
+                
+                print("  Computing fastest route with NetworkX (pure time)...")
+                try:
+                    fastest_route = nx.shortest_path(G, start_node, end_node, weight=fastest_weight)
+                    fastest_data["nodes"] = fastest_route
+                    fastest_data["distance_m"] = sum(
+                        G.edges[fastest_route[i], fastest_route[i+1], 0].get('length', 0)
+                        for i in range(len(fastest_route) - 1)
+                    )
+                    fastest_data["travel_time_s"] = sum(
+                        G.edges[fastest_route[i], fastest_route[i+1], 0].get('travel_time', 0)
+                        for i in range(len(fastest_route) - 1)
+                    )
+                    if fastest_data["travel_time_s"] > 0:
+                        fastest_data["avg_speed_kmh"] = (fastest_data["distance_m"] / fastest_data["travel_time_s"]) * 3.6
+                    fastest_data["safety_score"] = sum(
+                        (
+                            G.edges[fastest_route[i], fastest_route[i+1], 0].get('safety_score', 100)
+                            * (G.edges[fastest_route[i], fastest_route[i+1], 0].get('length', 1) / 1000.0)
+                        )
+                        for i in range(len(fastest_route) - 1)
+                    )
+                    print(f"  Fastest route: {len(fastest_route)} nodes, {fastest_data['travel_time_s']:.0f}s, safety_score={fastest_data['safety_score']:.1f}")
+                except nx.NetworkXNoPath:
+                    print("  No fastest path found!")
+            else:
+                print(f"  Using OSRM fastest route: {len(fastest_route)} nodes")
+            
+            # Now compute safest route with user's safety_alpha value
+            # Precompute normalization factors if not already done
+            if not fastest_route or 'fastest_weight' not in locals():
+                times = [d.get('travel_time', 0) for u, v, k, d in G.edges(keys=True, data=True)]
+                lengths = [d.get('length', 1) for u, v, k, d in G.edges(keys=True, data=True)]
+                safeties = [d.get('safety_score', 100) for u, v, k, d in G.edges(keys=True, data=True)]
+                max_time = max(times) if times else 1.0
+                max_length = max(lengths) if lengths else 1.0
+                max_safety = max(safeties) if safeties else 100.0
+                print(f"  max_time={max_time:.1f}s, max_length={max_length:.0f}m, max_safety={max_safety:.1f}")
+            
+            # Compute SAFEST route: use combined_weight with user's safety_alpha value
+            print(f"  Computing safest route (alpha={safety_alpha})...")
+
+            def combined_weight(u, v, data_attr):
+                data = normalize_edge_data(data_attr)
+                # time component normalized by global max
+                time = data.get('travel_time', 0)
+                t = (time / max_time) if max_time > 0 else 0
+                # safety component scaled by segment length to represent danger exposure
+                length = data.get('length', 1)
+                s_raw = data.get('safety_score', 100)
+                s = (s_raw * length) / (max_safety * max_length) if (max_safety > 0 and max_length > 0) else 0
+                out = (1.0 - safety_alpha) * t + safety_alpha * s
+
+                return out
+            # Use Dijkstra with custom weight function
+            safest_route = nx.shortest_path(G, start_node, end_node, weight=combined_weight)
+
+            safest_data["nodes"] = safest_route
+            safest_data["distance_m"] = sum(
+                G.edges[safest_route[i], safest_route[i+1], 0].get('length', 0)
+                for i in range(len(safest_route) - 1)
+            )
+            safest_data["travel_time_s"] = sum(
+                G.edges[safest_route[i], safest_route[i+1], 0].get('travel_time', 0)
+                for i in range(len(safest_route) - 1)
+            )
+            # Cumulative danger exposure: safety_score scaled by segment length (km)
+            safest_data["safety_score"] = sum(
+                (
+                    G.edges[safest_route[i], safest_route[i+1], 0].get('safety_score', 100)
+                    * (G.edges[safest_route[i], safest_route[i+1], 0].get('length', 1) / 1000.0)
+                )
+                for i in range(len(safest_route) - 1)
+            )
+            # Debug: total combined_weight along safest route
+            try:
+                total_combined_weight = sum(
+                    combined_weight(
+                        safest_route[i],
+                        safest_route[i + 1],
+                        G.edges[safest_route[i], safest_route[i + 1], 0]
+                    )
+                    for i in range(len(safest_route) - 1)
+                )
+                print(f"  Safest route combined_weight total: {total_combined_weight:.4f}")
+            except Exception as dbg_err:
+                print(f"  ⚠️ Could not compute combined_weight total: {dbg_err}")
+            print(f"  Safest route: {len(safest_route)} nodes, {safest_data['travel_time_s']:.0f}s, safety_score={safest_data['safety_score']:.1f}")
+            
+            # When safety_alpha=0.0, safest and fastest should be identical
+            if abs(safety_alpha - 0.0) < 0.01 and fastest_route and safest_route:
+                if fastest_route == safest_route:
+                    print(f"  ✓ Routes match when alpha≈0 (pure time)")
+                else:
+                    print(f"  ⚠️ Routes differ when alpha≈0 (should match): fastest={len(fastest_route)} nodes, safest={len(safest_route)} nodes")
+
+        except nx.NetworkXNoPath:
+            print("  No safe path found!")
+        # Convert routes to GeoJSON
+        fastest_geojson = route_to_geojson(fastest_route, G, "fastest") if fastest_route else None
+        safest_geojson = route_to_geojson(safest_route, G, "safest") if safest_route else None
+        print("Safest route time s:", safest_data.get("travel_time_s"))
+        response = {
+            "status": "success",
+            "start": {"lat": start_lat, "lon": start_lon},
+            "end": {"lat": end_lat, "lon": end_lon},
+            "fastest": {
+                "geojson": fastest_geojson,
+                "data": fastest_data
+            },
+            "safest": {
+                "geojson": safest_geojson,
+                "data": safest_data
+            }
+        }
+        
+        return jsonify(response)
+    
+    except Exception as e:
+        print(f"Error computing routes: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route('/api/health', methods=['GET'])
+def health():
+    """Health check endpoint."""
+    return jsonify({"status": "ok"})
+
+
+if __name__ == '__main__':
+    # Create web directories if they don't exist
+    os.makedirs('web/templates', exist_ok=True)
+    os.makedirs('web/static', exist_ok=True)
+    
+    # Optionally start building the graph in background so the UI can load quicker
+    try:
+        print("Starting background graph build...")
+        build_safe_graph = get_graph_builder()
+        import threading
+        t = threading.Thread(target=get_or_build_graph, args=(BBOX, build_safe_graph), daemon=True)
+        t.start()
+    except Exception as e:
+        print(f"Failed to start background graph build: {e}")
+
+    # Run the development server
+    print("Starting LitRoutes Web App...")
+    print("Open http://localhost:5000 in your browser")
+    # Disable the reloader to avoid watchdog restarts closing connections during development
+    app.run(debug=True, use_reloader=False, host='0.0.0.0', port=5000)
