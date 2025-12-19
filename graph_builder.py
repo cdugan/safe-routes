@@ -1,10 +1,22 @@
-import osmnx as ox
-# import matplotlib.pyplot as plt
-# import matplotlib.cm as cm
-# import matplotlib.colors as mcolors
+import psutil
+import os
+
+# Memory tracking helper (define early so we can use it during imports)
+def _get_mem_mb():
+    """Get current process memory in MB."""
+    try:
+        return psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+    except Exception:
+        return 0
+
 from data_fetcher import fetch_duke_lights, fetch_nlcd_raster
+
 import math
+_mem_after_math = _get_mem_mb()
+print(f"[graph_builder import] After math: {_mem_after_math:.1f} MB")
+
 from config import BBOX
+
 try:
     import geopandas as gpd
     from shapely.geometry import Point
@@ -200,19 +212,29 @@ def build_safe_graph(bbox):
 
     Returns (G_latlon, lights) where G_latlon has safety attributes and is in EPSG:4326.
     """
-    print("In build_safe_graph...")
+    # Lazy-load osmnx only when building a graph (not at app startup)
+    from osmnx import graph_from_bbox, project_graph, add_edge_speeds, add_edge_travel_times
+    
+    mem_start = _get_mem_mb()
+    print(f"In build_safe_graph... [mem: {mem_start:.1f} MB]")
     north, south, east, west = bbox
     print(f"1. Downloading street network for {bbox}...")
 
     # osmnx expects a tuple containing (west, south, east, north)
-    G = ox.graph_from_bbox((west, south, east, north), network_type='drive', simplify=True)
+    G = graph_from_bbox((west, south, east, north), network_type='drive', simplify=True)
+    mem_after_osm = _get_mem_mb()
+    print(f"   ✓ OSM graph downloaded: {len(G.nodes())} nodes, {len(G.edges())} edges [mem: {mem_after_osm:.1f} MB, Δ +{mem_after_osm - mem_start:.1f} MB]")
 
     # Fetch Duke lights (list of (lat, lon))
     lights_latlon = fetch_duke_lights(bbox)
+    mem_after_lights = _get_mem_mb()
+    print(f"   ✓ Duke lights fetched: {len(lights_latlon) if lights_latlon else 0} lights [mem: {mem_after_lights:.1f} MB, Δ +{mem_after_lights - mem_after_osm:.1f} MB]")
 
     # Project graph early to avoid scikit-learn requirement when searching
     print("   Projecting graph for spatial operations...")
-    G_proj = ox.project_graph(G)
+    G_proj = project_graph(G)
+    mem_after_proj = _get_mem_mb()
+    print(f"   ✓ Graph projected [mem: {mem_after_proj:.1f} MB, Δ +{mem_after_proj - mem_after_lights:.1f} MB]")
 
     # Initialize light counts on projected edges
     for u, v, k, data in G_proj.edges(keys=True, data=True):
@@ -338,6 +360,12 @@ def build_safe_graph(bbox):
                     G_proj.edges[u, v, k]['light_count'] = cnt
 
             print(f"   ✓ Counted lights with STRtree proximity ({LIGHT_PROXIMITY_THRESHOLD_M}m) allowing multi-edge attribution")
+            
+            # Clean up spatial structures to free memory
+            mem_before_cleanup = _get_mem_mb()
+            del tree, edge_geoms, edge_keys, id_to_key, wkb_to_key, counts
+            mem_after_cleanup = _get_mem_mb()
+            print(f"   ✓ Cleaned up STRtree structures [mem: {mem_after_cleanup:.1f} MB, Δ {mem_after_cleanup - mem_before_cleanup:.1f} MB]")
 
             # quick stats to verify lights applied
             edge_counts = [d.get('light_count', 0) for _, _, _, d in G_proj.edges(keys=True, data=True)]
@@ -352,14 +380,20 @@ def build_safe_graph(bbox):
 
     # Add basic travel metrics to projected graph
     print("   Adding speeds/travel times to projected graph...")
-    G_proj = ox.add_edge_speeds(G_proj)
-    G_proj = ox.add_edge_travel_times(G_proj)
+    G_proj = add_edge_speeds(G_proj)
+    G_proj = add_edge_travel_times(G_proj)
+    mem_after_speeds = _get_mem_mb()
+    print(f"   ✓ Speeds/times added [mem: {mem_after_speeds:.1f} MB]")
 
     # Fetch NLCD raster once for bbox
     print("   Fetching NLCD land cover raster for bbox once...")
     nlcd_raster, nlcd_bounds = fetch_nlcd_raster(bbox)
+    mem_after_nlcd = _get_mem_mb()
     if nlcd_raster is None or nlcd_bounds is None:
         print("   ⚠️ NLCD raster unavailable; using default land risk")
+    else:
+        raster_size_mb = nlcd_raster.nbytes / 1024 / 1024 if nlcd_raster is not None else 0
+        print(f"   ✓ NLCD raster loaded: shape={nlcd_raster.shape}, {raster_size_mb:.1f} MB raw [mem: {mem_after_nlcd:.1f} MB, Δ +{mem_after_nlcd - mem_after_speeds:.1f} MB]")
 
     # Prepare transformer for midpoint sampling
     target_crs = G_proj.graph.get('crs') if isinstance(G_proj.graph, dict) else None
@@ -436,11 +470,20 @@ def build_safe_graph(bbox):
         data['safety_score'] = float(safety)
 
     # Debug summary for land cover sampling
+    mem_after_scoring = _get_mem_mb()
     if land_samples == 0:
         print("   ⚠️ No NLCD samples were taken (raster or transform missing)")
     else:
         uniq = {c: land_codes.count(c) for c in set(land_codes)} if land_codes else {}
         print(f"   ▶ NLCD samples: {land_samples} (unknown: {land_unknown}) codes_seen: {uniq}")
+    print(f"   ✓ Edge scoring complete [mem: {mem_after_scoring:.1f} MB]")
+    
+    # Release NLCD raster from memory after scoring
+    mem_before_nlcd_del = _get_mem_mb()
+    del nlcd_raster
+    nlcd_raster = None
+    mem_after_nlcd_del = _get_mem_mb()
+    print(f"   ✓ NLCD raster released [mem: {mem_after_nlcd_del:.1f} MB, Δ {mem_after_nlcd_del - mem_before_nlcd_del:.1f} MB]")
 
     # Create an optimized routing weight (travel_time scaled by safety)
     for u, v, k, data in G_proj.edges(keys=True, data=True):
@@ -449,44 +492,19 @@ def build_safe_graph(bbox):
         data['optimized_weight'] = time_sec * safety_factor
 
     # Return graph in lat/lon for plotting and routing convenience
-    G_latlon = ox.project_graph(G_proj, to_crs='EPSG:4326')
+    mem_before_reproject = _get_mem_mb()
+    G_latlon = project_graph(G_proj, to_crs='EPSG:4326')
+    mem_after_reproject = _get_mem_mb()
+    print(f"   ✓ Graph re-projected to lat/lon [mem: {mem_after_reproject:.1f} MB, Δ +{mem_after_reproject - mem_before_reproject:.1f} MB]")
+    
+    # Clean up intermediate copies to free memory
+    mem_before_graph_del = _get_mem_mb()
+    del G_proj
+    del G
+    mem_after_graph_del = _get_mem_mb()
+    print(f"   ✓ Intermediate graphs released [mem: {mem_after_graph_del:.1f} MB, Δ {mem_after_graph_del - mem_before_graph_del:.1f} MB]")
+    
+    mem_final = _get_mem_mb()
+    print(f"   ✓ Build complete [final mem: {mem_final:.1f} MB, total Δ +{mem_final - mem_start:.1f} MB]")
+    
     return G_latlon, lights_latlon
-
-
-if __name__ == '__main__':
-    print("In Main: Building safe graph...")
-    G, lights = build_safe_graph(BBOX)
-
-    print("Visualizing Safety Map (Duke lights + Curvature)...")
-
-    fig, ax = plt.subplots(1, 1, figsize=(14, 10), facecolor='#111111')
-    ax.set_facecolor('#111111')
-
-    # Color edges by safety_score
-    scores = [data.get('safety_score', 100) for u, v, k, data in G.edges(keys=True, data=True)]
-    if scores:
-        norm = mcolors.Normalize(vmin=min(scores), vmax=max(scores))
-    else:
-        norm = mcolors.Normalize(vmin=0, vmax=150)
-    cmap = cm.get_cmap('coolwarm')
-    edge_colors = [cmap(norm(s)) for s in scores]
-
-    ox.plot_graph(G, ax=ax, edge_color=edge_colors, edge_linewidth=1.0,
-                  bgcolor='#111111', node_size=0, show=False)
-
-    if lights:
-        lats, lons = zip(*lights)
-        ax.scatter(lons, lats, c='#FFFF00', s=20, edgecolors='k', linewidths=0.3, zorder=6, alpha=0.95)
-
-    ax.set_title('Road Safety (Duke Lights + Curvature)', color='white')
-
-    # from matplotlib.cm import ScalarMappable
-    sm = ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-    cbar = fig.colorbar(sm, ax=ax, fraction=0.03, pad=0.04)
-    cbar.set_label('Safety Score (lower = safer)', color='white')
-    cbar.ax.yaxis.set_tick_params(color='white')
-    plt.setp(plt.getp(cbar.ax.axes, 'yticklabels'), color='white')
-
-    plt.tight_layout()
-    plt.show()

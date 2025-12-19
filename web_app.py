@@ -5,11 +5,16 @@ A Flask-based web server for visualizing and comparing fastest vs safest driving
 Uses the existing graph_builder and route_visualizer logic adapted for web delivery.
 """
 
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, g
 import time
 from flask_cors import CORS
 import json
 import os
+import psutil
+
+# Diagnostic: memory at each import stage
+_mem_at_start = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+print(f"[startup] Memory after stdlib imports: {_mem_at_start:.1f} MB")
 
 # Lazy imports - import heavy dependencies only when needed
 def get_nx():
@@ -24,22 +29,53 @@ def get_data_fetcher():
     from data_fetcher import fetch_duke_lights
     return fetch_duke_lights
 
-def get_route_visualizer():
-    from route_visualizer import (
-        geocode_address, snap_to_nearest_node, get_osrm_route, 
-        snap_osrm_route_to_graph
-    )
-    return geocode_address, snap_to_nearest_node, get_osrm_route, snap_osrm_route_to_graph
-
 # BBOX for default area
 # BBOX for default area (centralized in config)
 from config import BBOX
 
+_mem_after_config = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+print(f"[startup] Memory after config import: {_mem_after_config:.1f} MB (D +{_mem_after_config - _mem_at_start:.1f} MB)")
+
 app = Flask(__name__, static_folder='web/static', template_folder='web/templates')
 CORS(app)
 
+_mem_after_flask = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+print(f"[startup] Memory after Flask/CORS: {_mem_after_flask:.1f} MB (D +{_mem_after_flask - _mem_after_config:.1f} MB)")
+
 # Global graph cache to avoid rebuilding
 _graph_cache = {}
+
+
+def get_memory_usage():
+    """Get current memory usage in MB."""
+    try:
+        process = psutil.Process(os.getpid())
+        return process.memory_info().rss / 1024 / 1024
+    except Exception:
+        return 0
+
+
+@app.before_request
+def log_memory_before():
+    """Log memory before request."""
+    try:
+        g.mem_before = get_memory_usage()
+    except Exception:
+        g.mem_before = 0
+
+
+@app.after_request
+def log_memory_after(response):
+    """Log memory after request and compute delta."""
+    try:
+        mem_after = get_memory_usage()
+        mem_before = getattr(g, 'mem_before', 0)
+        delta = mem_after - mem_before
+        print(f"[memory] {request.method} {request.path}: {mem_after:.1f}MB (Δ {delta:+.1f}MB)")
+    except Exception:
+        pass
+    return response
+
 
 def get_or_build_graph(bbox, build_safe_graph_func):
     """Get cached graph or build new one."""
@@ -583,6 +619,34 @@ def api_routes():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.route('/api/memory', methods=['GET'])
+def api_memory():
+    """Monitor memory usage of this process and graph cache statistics."""
+    try:
+        process = psutil.Process(os.getpid())
+        mem_info = process.memory_info()
+        
+        # Calculate graph cache stats
+        graph_count = len(_graph_cache)
+        total_nodes = 0
+        total_edges = 0
+        for G, lights in _graph_cache.values():
+            total_nodes += len(G.nodes())
+            total_edges += len(G.edges())
+        
+        return jsonify({
+            "rss_mb": round(mem_info.rss / 1024 / 1024, 2),        # Resident Set Size (actual RAM)
+            "vms_mb": round(mem_info.vms / 1024 / 1024, 2),        # Virtual Memory Size
+            "percent": round(process.memory_percent(), 2),          # % of system RAM
+            "graph_cache_entries": graph_count,
+            "graph_total_nodes": total_nodes,
+            "graph_total_edges": total_edges,
+            "status": "ok"
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route('/api/health', methods=['GET'])
 def health():
     """Health check endpoint."""
@@ -591,10 +655,13 @@ def health():
 
 if __name__ == '__main__':
     # Create web directories if they don't exist
+    _mem_before_route_imports = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+    print(f"[startup] Memory before route computations: {_mem_before_route_imports:.1f} MB")
     os.makedirs('web/templates', exist_ok=True)
     os.makedirs('web/static', exist_ok=True)
-    
-    # Optionally start building the graph in background so the UI can load quicker
+
+    # Note: Graph is now built on first request only (lazy loading).
+    # This reduces startup memory. Uncomment below to pre-warm the graph at startup.
     try:
         print("Starting background graph build...")
         build_safe_graph = get_graph_builder()
@@ -603,6 +670,7 @@ if __name__ == '__main__':
         t.start()
     except Exception as e:
         print(f"Failed to start background graph build: {e}")
+
 
     # Run the development server
     print("Starting LitRoutes Web App...")
