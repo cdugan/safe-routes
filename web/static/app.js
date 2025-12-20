@@ -292,9 +292,17 @@ async function computeRoutes() {
         return;
     }
     
-    // Show loading indicator
+    // Show loading indicator and visibly disable the button
     document.getElementById('loadingIndicator').style.display = 'block';
     document.getElementById('resultsPanel').style.display = 'none';
+    const computeBtn = document.getElementById('computeBtn');
+    const prevBtnHTML = computeBtn ? computeBtn.innerHTML : null;
+    if (computeBtn) {
+        computeBtn.disabled = true;
+        computeBtn.innerHTML = '⏳ Computing…';
+        computeBtn.style.opacity = '0.75';
+        computeBtn.style.cursor = 'wait';
+    }
     
     try {
         // Parse coordinates from input if they look like coordinates
@@ -424,6 +432,13 @@ async function computeRoutes() {
         showError('Error computing routes: ' + error.message);
     } finally {
         document.getElementById('loadingIndicator').style.display = 'none';
+        const computeBtn = document.getElementById('computeBtn');
+        if (computeBtn) {
+            computeBtn.disabled = false;
+            if (prevBtnHTML !== null) computeBtn.innerHTML = prevBtnHTML;
+            computeBtn.style.opacity = '';
+            computeBtn.style.cursor = '';
+        }
     }
 
 }
