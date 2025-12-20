@@ -11,39 +11,19 @@ from flask_cors import CORS
 import json
 import os
 import psutil
-
-# Diagnostic: memory at each import stage
-_mem_at_start = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
-print(f"[startup] Memory after stdlib imports: {_mem_at_start:.1f} MB")
-
-# Lazy imports - import heavy dependencies only when needed
-def get_nx():
-    _mem_before_nx = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
-    import networkx as nx
-    _mem_after_nx = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
-    print(f"[startup] Memory after importing networkx: {_mem_after_nx:.1f} MB (D +{_mem_after_nx - _mem_before_nx:.1f} MB)")
-    return nx
-def get_route_visualizer():
-    _mem_before_rv = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
-    from route_visualizer import (
-        geocode_address, snap_to_nearest_node, get_osrm_route, 
-        snap_osrm_route_to_graph
-    )
-    _mem_after_rv = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
-    print(f"[startup] Memory after importing route_visualizer: {_mem_after_rv:.1f} MB (D +{_mem_after_rv - _mem_before_rv:.1f} MB)")
-    return geocode_address, snap_to_nearest_node, get_osrm_route, snap_osrm_route_to_graph
-
-def get_graph_builder():
-    from graph_builder import build_safe_graph
-    return build_safe_graph
-
-def get_data_fetcher():
-    from data_fetcher import fetch_duke_lights
-    return fetch_duke_lights
+import networkx as nx
+from route_visualizer import (
+    geocode_address, snap_to_nearest_node, get_osrm_route, 
+    snap_osrm_route_to_graph
+)
 
 # BBOX for default area
 # BBOX for default area (centralized in config)
 from config import BBOX
+
+# Establish a baseline memory reading before we start heavy imports.
+_mem_at_start = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+print(f"[startup] Memory at module import start: {_mem_at_start:.1f} MB")
 
 _mem_after_config = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
 print(f"[startup] Memory after config import: {_mem_after_config:.1f} MB (D +{_mem_after_config - _mem_at_start:.1f} MB)")
@@ -87,7 +67,7 @@ def _load_prebuilt_graph():
         print(f"[startup] ERROR loading graph: {e}")
         return False
 
-# --- Load pre-built graph at module import time (runs for both gunicorn and python web_app.py) ---
+# Load graph immediately at import time (works for gunicorn workers too)
 _mem_before_graph = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
 print(f"[startup] Memory before loading graph: {_mem_before_graph:.1f} MB")
 _load_prebuilt_graph()
@@ -97,32 +77,15 @@ print(f"[startup] Memory after loading graph: {_mem_after_graph_load:.1f} MB (D 
 # --- GeoJSON response caching (deterministic output from fixed graph) ---
 _geojson_cache = {}  # Keys: 'graph-data', 'graph-data-lite'; Values: (geojson_dict, size_bytes)
 
-def _load_prebuilt_graph():
-    """Load the pre-built graph from pickle file."""
-    global _GRAPH_LOADED, _GRAPH_LOAD_ERROR
-    import pickle
-    
-    if not os.path.exists(_GRAPH_PREBUILT_FILE):
-        _GRAPH_LOAD_ERROR = f"Pre-built graph file not found: {_GRAPH_PREBUILT_FILE}"
-        print(f"[startup] ERROR: {_GRAPH_LOAD_ERROR}")
-        print(f"[startup] Run 'python build_graph_offline.py' to generate it first.")
-        return False
-    
-    try:
-        print(f"[startup] Loading pre-built graph from {_GRAPH_PREBUILT_FILE}...")
-        start = time.time()
-        with open(_GRAPH_PREBUILT_FILE, 'rb') as f:
-            G, lights, bbox = pickle.load(f)
-        elapsed = time.time() - start
-        
-        _graph_cache[str(BBOX)] = (G, lights)
-        _GRAPH_LOADED = True
-        print(f"[startup] Graph loaded in {elapsed:.3f}s — nodes={len(G.nodes())} edges={len(G.edges())} lights={len(lights) if lights else 0}")
-        return True
-    except Exception as e:
-        _GRAPH_LOAD_ERROR = str(e)
-        print(f"[startup] ERROR loading graph: {e}")
-        return False
+
+def _get_graph():
+    """Return the pre-loaded graph and lights; error if missing."""
+    if not _GRAPH_LOADED:
+        raise RuntimeError(f"Graph not loaded. Pre-built graph file missing or load failed: {_GRAPH_LOAD_ERROR}")
+    bbox_key = str(BBOX)
+    if bbox_key in _graph_cache:
+        return _graph_cache[bbox_key]
+    raise RuntimeError("Graph cache miss despite successful load (should not happen)")
 
 
 def get_memory_usage():
@@ -156,19 +119,81 @@ def log_memory_after(response):
     return response
 
 
-def get_or_build_graph(bbox, build_safe_graph_func=None):
-    """Get cached graph or raise error if not pre-loaded.
-    
-    Graph must be pre-built via build_graph_offline.py.
-    """
-    bbox_key = str(bbox)
-    if bbox_key in _graph_cache:
-        return _graph_cache[bbox_key]
-    
-    if not _GRAPH_LOADED:
-        raise RuntimeError(f"Graph not loaded. Pre-built graph file missing or load failed: {_GRAPH_LOAD_ERROR}")
-    
-    raise RuntimeError("Graph cache miss despite successful load (should not happen)")
+def _build_full_geojson_cache():
+    """Build and cache the full graph GeoJSON (deterministic)."""
+    if 'graph-data' in _geojson_cache:
+        return
+    G, lights = _get_graph()
+    edges_fc = graph_to_geojson(G)
+    lights_list = [{"lat": lat, "lon": lon} for lat, lon in lights] if lights else []
+    response = {
+        "bbox": list(BBOX),
+        "edges": edges_fc,
+        "lights": lights_list,
+        "status": "success"
+    }
+    try:
+        payload = json.dumps(response)
+        _geojson_cache['graph-data'] = (response, len(payload))
+    except Exception:
+        _geojson_cache['graph-data'] = (response, None)
+
+
+def _build_lite_geojson_cache():
+    """Build and cache the sampled graph GeoJSON (deterministic)."""
+    if 'graph-data-lite' in _geojson_cache:
+        return
+    G, lights = _get_graph()
+    total_edges = len(list(G.edges(keys=True)))
+    sample_interval = max(1, total_edges // 1000)
+    features = []
+    i = 0
+    for u, v, k, data in G.edges(keys=True, data=True):
+        if (i % sample_interval) != 0:
+            i += 1
+            continue
+        geom = data.get('geometry')
+        if geom is not None:
+            try:
+                coords = [[round(float(x), 5), round(float(y), 5)] for x, y in geom.coords]
+            except Exception:
+                coords = [[round(G.nodes[u]['x'], 5), round(G.nodes[u]['y'], 5)], [round(G.nodes[v]['x'], 5), round(G.nodes[v]['y'], 5)]]
+        else:
+            coords = [[round(G.nodes[u]['x'], 5), round(G.nodes[u]['y'], 5)], [round(G.nodes[v]['x'], 5), round(G.nodes[v]['y'], 5)]]
+
+        length_val = data.get('length', 0)
+        safety_val = data.get('safety_score', 100)
+        safety_per_len = (safety_val / length_val) if length_val else None
+
+        features.append({
+            'type': 'Feature',
+            'geometry': {'type': 'LineString', 'coordinates': coords},
+            'properties': {
+                'safety_score': safety_val,
+                'light_count': data.get('light_count', 0),
+                'curve_score': data.get('curve_score', 0),
+                'darkness_score': data.get('darkness_score', 0),
+                'highway_risk': data.get('highway_risk', 1),
+                'highway_tag': data.get('highway_tag', None),
+                'land_risk': data.get('land_risk', 0.6),
+                'land_label': data.get('land_label', 'Unknown'),
+                'safety_per_length': safety_per_len
+            }
+        })
+        i += 1
+
+    response = {'status': 'success', 'edges': {'type': 'FeatureCollection', 'features': features}, 'lights': [{"lat": lat, "lon": lon} for lat, lon in lights] if lights else []}
+    try:
+        payload = json.dumps(response)
+        _geojson_cache['graph-data-lite'] = (response, len(payload))
+    except Exception:
+        _geojson_cache['graph-data-lite'] = (response, None)
+
+
+def _warm_geojson_caches():
+    """Build both caches at startup to avoid lazy work on first request."""
+    _build_full_geojson_cache()
+    _build_lite_geojson_cache()
 
 
 def graph_to_geojson(G):
@@ -284,6 +309,10 @@ def route_to_geojson(route_nodes, G, route_type="fastest"):
     }
 
 
+# Warm caches at module import (no lazy loading)
+_warm_geojson_caches()
+
+
 @app.route('/')
 def index():
     """Serve the main web interface."""
@@ -305,10 +334,7 @@ def api_graph_data():
     try:
         t0 = time.time()
         print('[api] /api/graph-data request received (building cache)')
-        # Lazy load dependencies
-        build_safe_graph = get_graph_builder()
-
-        G, lights = get_or_build_graph(BBOX, build_safe_graph)
+        G, lights = _get_graph()
 
         # Build response with graph edges, lights, and bbox
         edges_fc = graph_to_geojson(G)
@@ -350,8 +376,7 @@ def api_graph_data_lite():
     
     try:
         print('[api] /api/graph-data-lite request received (building cache)')
-        build_safe_graph = get_graph_builder()
-        G, lights = get_or_build_graph(BBOX, build_safe_graph)
+        G, lights = _get_graph()
 
         # sample edges: take every Nth edge to keep payload small
         total_edges = len(list(G.edges(keys=True)))
@@ -419,10 +444,8 @@ def api_graph_summary():
     """
     try:
         print('[api] /api/graph-summary request received')
-        build_safe_graph = get_graph_builder()
 
-        # Ensure the graph is available; wait for startup build if needed
-        G, lights = get_or_build_graph(BBOX, build_safe_graph)
+        G, lights = _get_graph()
 
         # prepare a small preview of edges (no geometry), up to 50 entries
         preview = []
@@ -465,10 +488,7 @@ def api_graph_summary():
 def api_routes():
     """Compute and return fastest vs safest routes."""
     try:
-        # Lazy load heavy dependencies
-        nx = get_nx()
-        build_safe_graph = get_graph_builder()
-        geocode_address, snap_to_nearest_node, get_osrm_route, snap_osrm_route_to_graph = get_route_visualizer()
+        # Dependencies are eagerly imported at module load
         
         data = request.get_json()
         start_input = data.get('start')
@@ -495,7 +515,7 @@ def api_routes():
             return jsonify({"status": "error", "message": "Invalid end format"}), 400
         
         # Get graph
-        G, lights = get_or_build_graph(BBOX, build_safe_graph)
+        G, lights = _get_graph()
         
         # Snap to nearest nodes
         print(f"Snapping ({start_lat}, {start_lon}) and ({end_lat}, {end_lon}) to graph...")
