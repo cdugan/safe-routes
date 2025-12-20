@@ -20,6 +20,12 @@ print(f"[startup] Memory after stdlib imports: {_mem_at_start:.1f} MB")
 def get_nx():
     import networkx as nx
     return nx
+def get_route_visualizer():
+    from route_visualizer import (
+        geocode_address, snap_to_nearest_node, get_osrm_route, 
+        snap_osrm_route_to_graph
+    )
+    return geocode_address, snap_to_nearest_node, get_osrm_route, snap_osrm_route_to_graph
 
 def get_graph_builder():
     from graph_builder import build_safe_graph
