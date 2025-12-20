@@ -1,13 +1,4 @@
-- Debug error that occurs on first route computation.
-Error computing routes: Failed to execute 'json' on 'Response': Unexpected end of JSON input
 
-
-
-- Reduce load times as much as possible
-    - seems that maybe the graph does additional loading after HTTP request is made.
-    We should include this loading in graph startup. No more lazy loading.
-    - Seems that route computation is faster the second time. Again we should
-    ensure that all loading is done at startup. 
 - Make it more obvious that "Compare Routes" is actively running.
 
 

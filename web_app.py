@@ -196,6 +196,38 @@ def _warm_geojson_caches():
     _build_lite_geojson_cache()
 
 
+def _warm_route_computation():
+    """Prime a tiny route computation so first user request is fast."""
+    try:
+        G, _ = _get_graph()
+        try:
+            u, v = next(iter(G.edges()))
+        except StopIteration:
+            print("[startup] Route warm-up skipped: graph has no edges")
+            return
+
+        # Run a lightweight nearest-node lookup to warm osmnx/shapely
+        try:
+            snap_to_nearest_node(G, G.nodes[u]['y'], G.nodes[u]['x'])
+        except Exception as warm_err:
+            print(f"[startup] Route warm-up nearest-node skipped: {warm_err}")
+
+        # Run a quick shortest-path to warm NetworkX internals
+        try:
+            path = nx.shortest_path(
+                G,
+                u,
+                v,
+                weight=lambda _u, _v, data: data.get('travel_time', data.get('length', 1))
+            )
+            route_to_geojson(path, G, "warm")
+            print(f"[startup] Route warm-up complete: {len(path)} nodes")
+        except Exception as warm_path_err:
+            print(f"[startup] Route warm-up path skipped: {warm_path_err}")
+    except Exception as e:
+        print(f"[startup] Route warm-up failed: {e}")
+
+
 def graph_to_geojson(G):
     """Convert NetworkX graph to GeoJSON for map visualization."""
     features = []
@@ -311,6 +343,9 @@ def route_to_geojson(route_nodes, G, route_type="fastest"):
 
 # Warm caches at module import (no lazy loading)
 _warm_geojson_caches()
+
+# Warm a tiny route computation to avoid first-request latency
+_warm_route_computation()
 
 
 @app.route('/')
