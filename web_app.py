@@ -51,6 +51,12 @@ print(f"[startup] Memory after Flask/CORS: {_mem_after_flask:.1f} MB (D +{_mem_a
 # Global graph cache to avoid rebuilding
 _graph_cache = {}
 
+# --- Single-build guard ---
+import threading
+_GRAPH_READY_EVENT = threading.Event()
+_GRAPH_BUILD_STARTED = False
+_GRAPH_BUILD_ERROR = None
+
 
 def get_memory_usage():
     """Get current memory usage in MB."""
@@ -84,16 +90,27 @@ def log_memory_after(response):
 
 
 def get_or_build_graph(bbox, build_safe_graph_func):
-    """Get cached graph or build new one."""
+    """Get cached graph or wait for the startup build to complete.
+
+    Avoids triggering a second build during the initial build window.
+    """
     bbox_key = str(bbox)
-    if bbox_key not in _graph_cache:
-        print(f"[graph] cache miss — Building graph for {bbox}...")
-        start = time.time()
-        G, lights = build_safe_graph_func(bbox)
-        elapsed = time.time() - start
-        print(f"[graph] built in {elapsed:.2f}s — nodes={len(G.nodes())} edges={len(G.edges())} lights={len(lights) if lights else 0}")
-        _graph_cache[bbox_key] = (G, lights)
-    return _graph_cache[bbox_key]
+    # If already cached, return immediately
+    if bbox_key in _graph_cache:
+        return _graph_cache[bbox_key]
+
+    # Otherwise, wait for the startup build to complete
+    print(f"[graph] cache miss — waiting for startup build to finish...")
+    _GRAPH_READY_EVENT.wait()
+
+    # After the event, either the cache is populated or an error occurred
+    if bbox_key in _graph_cache:
+        return _graph_cache[bbox_key]
+    if _GRAPH_BUILD_ERROR:
+        raise RuntimeError(f"Graph build failed: {_GRAPH_BUILD_ERROR}")
+
+    # Fallback safeguard: as per requirement, do NOT build here
+    raise RuntimeError("Graph not built yet; startup build did not populate cache")
 
 
 def graph_to_geojson(G):
@@ -319,16 +336,8 @@ def api_graph_summary():
         print('[api] /api/graph-summary request received')
         build_safe_graph = get_graph_builder()
 
-        bbox_key = str(BBOX)
-        # If graph isn't built yet, start background build and return quickly
-        if bbox_key not in _graph_cache:
-            import threading
-            print('[api] graph not cached — starting background build')
-            t = threading.Thread(target=get_or_build_graph, args=(BBOX, build_safe_graph), daemon=True)
-            t.start()
-            return jsonify({'status': 'building', 'message': 'Graph build started in background; retry /api/graph-summary in a few seconds'})
-
-        G, lights = _graph_cache[bbox_key]
+        # Ensure the graph is available; wait for startup build if needed
+        G, lights = get_or_build_graph(BBOX, build_safe_graph)
 
         # prepare a small preview of edges (no geometry), up to 50 entries
         preview = []
@@ -666,14 +675,28 @@ if __name__ == '__main__':
     os.makedirs('web/templates', exist_ok=True)
     os.makedirs('web/static', exist_ok=True)
 
-    # Note: Graph is now built on first request only (lazy loading).
-    # This reduces startup memory. Uncomment below to pre-warm the graph at startup.
+    # Start the single background build at startup and signal readiness when done
     try:
-        print("Starting background graph build...")
-        build_safe_graph = get_graph_builder()
-        import threading
-        t = threading.Thread(target=get_or_build_graph, args=(BBOX, build_safe_graph), daemon=True)
-        t.start()
+        def _startup_build():
+            global _GRAPH_BUILD_ERROR
+            try:
+                build_safe_graph = get_graph_builder()
+                print('[startup] Building graph in background...')
+                start = time.time()
+                G, lights = build_safe_graph(BBOX)
+                elapsed = time.time() - start
+                _graph_cache[str(BBOX)] = (G, lights)
+                print(f"[startup] Graph built in {elapsed:.2f}s — nodes={len(G.nodes())} edges={len(G.edges())} lights={len(lights) if lights else 0}")
+            except Exception as e:
+                _GRAPH_BUILD_ERROR = e
+                print(f"[startup] Graph build failed: {e}")
+            finally:
+                _GRAPH_READY_EVENT.set()
+
+        if not _GRAPH_BUILD_STARTED:
+            _GRAPH_BUILD_STARTED = True
+            t = threading.Thread(target=_startup_build, daemon=True)
+            t.start()
     except Exception as e:
         print(f"Failed to start background graph build: {e}")
 
