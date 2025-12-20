@@ -7,7 +7,7 @@ Format: (north, south, east, west)
 # Default area (Hendersonville region)
 BBOX = (35.42, 35.28, -82.40, -82.55) 
 # smaller area for testing
-BBOX = (35.322, 35.31, -82.45, -82.47) 
+# BBOX = (35.322, 35.31, -82.45, -82.47) 
 
 # Raleigh area
 # BBOX = (35.75, 35.72, -78.72, -78.75)
