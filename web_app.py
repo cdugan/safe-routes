@@ -60,6 +60,40 @@ _graph_cache = {}
 _GRAPH_LOADED = False
 _GRAPH_LOAD_ERROR = None
 
+def _load_prebuilt_graph():
+    """Load the pre-built graph from pickle file."""
+    global _GRAPH_LOADED, _GRAPH_LOAD_ERROR
+    import pickle
+    
+    if not os.path.exists(_GRAPH_PREBUILT_FILE):
+        _GRAPH_LOAD_ERROR = f"Pre-built graph file not found: {_GRAPH_PREBUILT_FILE}"
+        print(f"[startup] ERROR: {_GRAPH_LOAD_ERROR}")
+        print(f"[startup] Run 'python build_graph_offline.py' to generate it first.")
+        return False
+    
+    try:
+        print(f"[startup] Loading pre-built graph from {_GRAPH_PREBUILT_FILE}...")
+        start = time.time()
+        with open(_GRAPH_PREBUILT_FILE, 'rb') as f:
+            G, lights, bbox = pickle.load(f)
+        elapsed = time.time() - start
+        
+        _graph_cache[str(BBOX)] = (G, lights)
+        _GRAPH_LOADED = True
+        print(f"[startup] Graph loaded in {elapsed:.3f}s — nodes={len(G.nodes())} edges={len(G.edges())} lights={len(lights) if lights else 0}")
+        return True
+    except Exception as e:
+        _GRAPH_LOAD_ERROR = str(e)
+        print(f"[startup] ERROR loading graph: {e}")
+        return False
+
+# --- Load pre-built graph at module import time (runs for both gunicorn and python web_app.py) ---
+_mem_before_graph = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+print(f"[startup] Memory before loading graph: {_mem_before_graph:.1f} MB")
+_load_prebuilt_graph()
+_mem_after_graph_load = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+print(f"[startup] Memory after loading graph: {_mem_after_graph_load:.1f} MB (D +{_mem_after_graph_load - _mem_before_graph:.1f} MB)")
+
 # --- GeoJSON response caching (deterministic output from fixed graph) ---
 _geojson_cache = {}  # Keys: 'graph-data', 'graph-data-lite'; Values: (geojson_dict, size_bytes)
 
@@ -721,15 +755,8 @@ def health():
 
 if __name__ == '__main__':
     # Create web directories if they don't exist
-    _mem_before_route_imports = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
-    print(f"[startup] Memory before loading graph: {_mem_before_route_imports:.1f} MB")
     os.makedirs('web/templates', exist_ok=True)
     os.makedirs('web/static', exist_ok=True)
-
-    # Load pre-built graph at startup
-    _load_prebuilt_graph()
-    _mem_after_graph_load = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
-    print(f"[startup] Memory after loading graph: {_mem_after_graph_load:.1f} MB (D +{_mem_after_graph_load - _mem_before_route_imports:.1f} MB)")
 
     # Run the development server
     print("Starting LitRoutes Web App...")
