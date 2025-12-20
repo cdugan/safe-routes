@@ -18,13 +18,19 @@ print(f"[startup] Memory after stdlib imports: {_mem_at_start:.1f} MB")
 
 # Lazy imports - import heavy dependencies only when needed
 def get_nx():
+    _mem_before_nx = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
     import networkx as nx
+    _mem_after_nx = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+    print(f"[startup] Memory after importing networkx: {_mem_after_nx:.1f} MB (D +{_mem_after_nx - _mem_before_nx:.1f} MB)")
     return nx
 def get_route_visualizer():
+    _mem_before_rv = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
     from route_visualizer import (
         geocode_address, snap_to_nearest_node, get_osrm_route, 
         snap_osrm_route_to_graph
     )
+    _mem_after_rv = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+    print(f"[startup] Memory after importing route_visualizer: {_mem_after_rv:.1f} MB (D +{_mem_after_rv - _mem_before_rv:.1f} MB)")
     return geocode_address, snap_to_nearest_node, get_osrm_route, snap_osrm_route_to_graph
 
 def get_graph_builder():
@@ -48,14 +54,41 @@ CORS(app)
 _mem_after_flask = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
 print(f"[startup] Memory after Flask/CORS: {_mem_after_flask:.1f} MB (D +{_mem_after_flask - _mem_after_config:.1f} MB)")
 
-# Global graph cache to avoid rebuilding
+# --- Pre-built graph loading ---
+_GRAPH_PREBUILT_FILE = 'graph_prebuilt.pkl'
 _graph_cache = {}
+_GRAPH_LOADED = False
+_GRAPH_LOAD_ERROR = None
 
-# --- Single-build guard ---
-import threading
-_GRAPH_READY_EVENT = threading.Event()
-_GRAPH_BUILD_STARTED = False
-_GRAPH_BUILD_ERROR = None
+# --- GeoJSON response caching (deterministic output from fixed graph) ---
+_geojson_cache = {}  # Keys: 'graph-data', 'graph-data-lite'; Values: (geojson_dict, size_bytes)
+
+def _load_prebuilt_graph():
+    """Load the pre-built graph from pickle file."""
+    global _GRAPH_LOADED, _GRAPH_LOAD_ERROR
+    import pickle
+    
+    if not os.path.exists(_GRAPH_PREBUILT_FILE):
+        _GRAPH_LOAD_ERROR = f"Pre-built graph file not found: {_GRAPH_PREBUILT_FILE}"
+        print(f"[startup] ERROR: {_GRAPH_LOAD_ERROR}")
+        print(f"[startup] Run 'python build_graph_offline.py' to generate it first.")
+        return False
+    
+    try:
+        print(f"[startup] Loading pre-built graph from {_GRAPH_PREBUILT_FILE}...")
+        start = time.time()
+        with open(_GRAPH_PREBUILT_FILE, 'rb') as f:
+            G, lights, bbox = pickle.load(f)
+        elapsed = time.time() - start
+        
+        _graph_cache[str(BBOX)] = (G, lights)
+        _GRAPH_LOADED = True
+        print(f"[startup] Graph loaded in {elapsed:.3f}s — nodes={len(G.nodes())} edges={len(G.edges())} lights={len(lights) if lights else 0}")
+        return True
+    except Exception as e:
+        _GRAPH_LOAD_ERROR = str(e)
+        print(f"[startup] ERROR loading graph: {e}")
+        return False
 
 
 def get_memory_usage():
@@ -89,28 +122,19 @@ def log_memory_after(response):
     return response
 
 
-def get_or_build_graph(bbox, build_safe_graph_func):
-    """Get cached graph or wait for the startup build to complete.
-
-    Avoids triggering a second build during the initial build window.
+def get_or_build_graph(bbox, build_safe_graph_func=None):
+    """Get cached graph or raise error if not pre-loaded.
+    
+    Graph must be pre-built via build_graph_offline.py.
     """
     bbox_key = str(bbox)
-    # If already cached, return immediately
     if bbox_key in _graph_cache:
         return _graph_cache[bbox_key]
-
-    # Otherwise, wait for the startup build to complete
-    print(f"[graph] cache miss — waiting for startup build to finish...")
-    _GRAPH_READY_EVENT.wait()
-
-    # After the event, either the cache is populated or an error occurred
-    if bbox_key in _graph_cache:
-        return _graph_cache[bbox_key]
-    if _GRAPH_BUILD_ERROR:
-        raise RuntimeError(f"Graph build failed: {_GRAPH_BUILD_ERROR}")
-
-    # Fallback safeguard: as per requirement, do NOT build here
-    raise RuntimeError("Graph not built yet; startup build did not populate cache")
+    
+    if not _GRAPH_LOADED:
+        raise RuntimeError(f"Graph not loaded. Pre-built graph file missing or load failed: {_GRAPH_LOAD_ERROR}")
+    
+    raise RuntimeError("Graph cache miss despite successful load (should not happen)")
 
 
 def graph_to_geojson(G):
@@ -234,10 +258,19 @@ def index():
 
 @app.route('/api/graph-data', methods=['GET'])
 def api_graph_data():
-    """Get the road network graph as GeoJSON."""
+    """Get the road network graph as GeoJSON.
+    
+    Response is cached since the graph is fixed.
+    """
+    # Return cached response if available
+    if 'graph-data' in _geojson_cache:
+        print('[api] /api/graph-data request received (cached)')
+        cached_response, cached_size = _geojson_cache['graph-data']
+        return jsonify(cached_response)
+    
     try:
         t0 = time.time()
-        print('[api] /api/graph-data request received')
+        print('[api] /api/graph-data request received (building cache)')
         # Lazy load dependencies
         build_safe_graph = get_graph_builder()
 
@@ -253,14 +286,15 @@ def api_graph_data():
             "status": "success"
         }
 
-        # log size and timing
+        # Cache the response for future requests
         try:
             payload = json.dumps(response)
             size = len(payload)
+            _geojson_cache['graph-data'] = (response, size)
         except Exception:
             size = None
         elapsed = time.time() - t0
-        print(f"[api] /api/graph-data ready — edges={len(edges_fc.get('features',[]))} bytes={size} time_s={elapsed:.2f}")
+        print(f"[api] /api/graph-data cached — edges={len(edges_fc.get('features',[]))} bytes={size} time_s={elapsed:.2f}")
         return jsonify(response)
     except Exception as e:
         print(f"[api] /api/graph-data error: {e}")
@@ -272,9 +306,16 @@ def api_graph_data_lite():
     """Return a trimmed/sampled GeoJSON to allow fast client-side loading.
 
     This reduces coordinate precision, drops unused properties, and samples edges.
+    Response is cached since the graph is fixed.
     """
+    # Return cached response if available
+    if 'graph-data-lite' in _geojson_cache:
+        print('[api] /api/graph-data-lite request received (cached)')
+        cached_response, cached_size = _geojson_cache['graph-data-lite']
+        return jsonify(cached_response)
+    
     try:
-        print('[api] /api/graph-data-lite request received')
+        print('[api] /api/graph-data-lite request received (building cache)')
         build_safe_graph = get_graph_builder()
         G, lights = get_or_build_graph(BBOX, build_safe_graph)
 
@@ -319,8 +360,18 @@ def api_graph_data_lite():
             i += 1
 
         response = {'type': 'FeatureCollection', 'features': features}
-        print(f"[api] /api/graph-data-lite ready — features={len(features)} sampled_from={total_edges}")
-        return jsonify({'status': 'success', 'edges': response, 'lights': [{"lat": lat, "lon": lon} for lat, lon in lights] if lights else []})
+        lights_list = [{"lat": lat, "lon": lon} for lat, lon in lights] if lights else []
+        full_response = {'status': 'success', 'edges': response, 'lights': lights_list}
+        
+        # Cache the response for future requests
+        try:
+            payload = json.dumps(full_response)
+            _geojson_cache['graph-data-lite'] = (full_response, len(payload))
+            print(f"[api] /api/graph-data-lite cached — features={len(features)} sampled_from={total_edges} size={len(payload)} bytes")
+        except Exception as cache_err:
+            print(f"[api] /api/graph-data-lite cache save failed: {cache_err}")
+        
+        return jsonify(full_response)
     except Exception as e:
         print(f"[api] /api/graph-data-lite error: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -671,35 +722,14 @@ def health():
 if __name__ == '__main__':
     # Create web directories if they don't exist
     _mem_before_route_imports = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
-    print(f"[startup] Memory before route computations: {_mem_before_route_imports:.1f} MB")
+    print(f"[startup] Memory before loading graph: {_mem_before_route_imports:.1f} MB")
     os.makedirs('web/templates', exist_ok=True)
     os.makedirs('web/static', exist_ok=True)
 
-    # Start the single background build at startup and signal readiness when done
-    try:
-        def _startup_build():
-            global _GRAPH_BUILD_ERROR
-            try:
-                build_safe_graph = get_graph_builder()
-                print('[startup] Building graph in background...')
-                start = time.time()
-                G, lights = build_safe_graph(BBOX)
-                elapsed = time.time() - start
-                _graph_cache[str(BBOX)] = (G, lights)
-                print(f"[startup] Graph built in {elapsed:.2f}s — nodes={len(G.nodes())} edges={len(G.edges())} lights={len(lights) if lights else 0}")
-            except Exception as e:
-                _GRAPH_BUILD_ERROR = e
-                print(f"[startup] Graph build failed: {e}")
-            finally:
-                _GRAPH_READY_EVENT.set()
-
-        if not _GRAPH_BUILD_STARTED:
-            _GRAPH_BUILD_STARTED = True
-            t = threading.Thread(target=_startup_build, daemon=True)
-            t.start()
-    except Exception as e:
-        print(f"Failed to start background graph build: {e}")
-
+    # Load pre-built graph at startup
+    _load_prebuilt_graph()
+    _mem_after_graph_load = psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024
+    print(f"[startup] Memory after loading graph: {_mem_after_graph_load:.1f} MB (D +{_mem_after_graph_load - _mem_before_route_imports:.1f} MB)")
 
     # Run the development server
     print("Starting LitRoutes Web App...")
