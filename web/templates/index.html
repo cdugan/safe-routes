@@ -44,10 +44,10 @@
                     
                     <div class="input-group">
                         <label for="safetySlider">Safety vs Time</label>
-                        <input type="range" id="safetySlider" min="0" max="100" value="50" />
+                        <input type="range" id="safetySlider" min="0" max="100" value="0" />
                         <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;gap:8px;">
                             <span style="flex:1;text-align:left;">Time</span>
-                            <strong id="safetyLabel" style="flex:0 0 auto;min-width:48px;text-align:center;">50%</strong>
+                            <strong id="safetyLabel" style="flex:0 0 auto;min-width:48px;text-align:center;">0%</strong>
                             <span style="flex:1;text-align:right;">Safety</span>
                         </div>
                     </div>
@@ -75,7 +75,7 @@
                                 <span class="value" id="fastestSpeed">-</span>
                             </div>
                             <div class="metric">
-                                <span class="label">Safety Score:</span>
+                                <span class="label">Danger Score:</span>
                                 <span class="value" id="fastestScore">-</span>
                             </div>
                         </div>
@@ -91,7 +91,7 @@
                                 <span class="value" id="safestTime">-</span>
                             </div>
                             <div class="metric">
-                                <span class="label">Safety Score:</span>
+                                <span class="label">Danger Score:</span>
                                 <span class="value" id="safestScore">-</span>
                             </div>
                         </div>
@@ -131,7 +131,7 @@
                             <span>Start Point</span>
                         </div>
                         <div class="legend-item">
-                            <div class="legend-color" style="background: #ff0000; border: 2px solid white;"></div>
+                            <div class="legend-color" style="background: #a200ffff; border: 2px solid white;"></div>
                             <span>End Point</span>
                         </div>
                     </div>

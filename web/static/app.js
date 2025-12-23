@@ -95,7 +95,7 @@ async function loadGraphData() {
                             ? props.safety_per_length.toFixed(6)
                             : 'N/A';
                         let popup = `<b>${props.name || 'Unknown Road'}</b><br>`;
-                        popup += `Safety Score: ${safetyScore}<br>`;
+                        popup += `Danger Score: ${safetyScore}<br>`;
                         if (props.length !== undefined) {
                             popup += `Length: ${(props.length / 1000).toFixed(2)} km<br>`;
                         }
@@ -109,7 +109,7 @@ async function loadGraphData() {
                         popup += `Highway Tag: ${highwayTag}<br>`;
                         popup += `Land Risk (0 safest): ${landRisk}<br>`;
                         popup += `Land Use: ${landLabel}<br>`;
-                        popup += `Safety per Length: ${safetyPerLen}`;
+                        popup += `Danger per Length: ${safetyPerLen}`;
                         layer.bindPopup(popup);
                     }
                 }).addTo(map);
@@ -170,7 +170,7 @@ async function loadGraphData() {
                                 ? props.safety_per_length.toFixed(6)
                                 : 'N/A';
                             let popup = `<b>${props.name || 'Unknown Road'}</b><br>`;
-                            popup += `Safety Score: ${safetyScore}<br>`;
+                            popup += `Danger Score: ${safetyScore}<br>`;
                             if (props.length !== undefined) {
                                 popup += `Length: ${(props.length / 1000).toFixed(2)} km<br>`;
                             }
@@ -184,7 +184,7 @@ async function loadGraphData() {
                             popup += `Highway Tag: ${highwayTag}<br>`;
                             popup += `Land Risk (0 safest): ${landRisk}<br>`;
                             popup += `Land Use: ${landLabel}<br>`;
-                            popup += `Safety per Length: ${safetyPerLen}`;
+                            popup += `Danger per Length: ${safetyPerLen}`;
                             layer.bindPopup(popup);
                         }
                     }).addTo(map);
@@ -253,7 +253,7 @@ function setEndPoint(lat, lon) {
     
     endMarker = L.marker([lat, lon], {
         icon: L.icon({
-            iconUrl: getMarkerIcon('red'),
+            iconUrl: getMarkerIcon('purple'),
             iconSize: [32, 32],
             iconAnchor: [16, 32]
         })
@@ -264,7 +264,7 @@ function setEndPoint(lat, lon) {
 function getMarkerIcon(color) {
     const colors = {
         'green': '#00ff00',
-        'red': '#ff0000'
+        'purple': '#a200ffff'
     };
     const svgIcon = `
         <svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
@@ -311,7 +311,7 @@ async function computeRoutes() {
         
         // Slider 0=safety, 100=time, so safety_alpha = 1 - (time_pct / 100)
         const slider = document.getElementById('safetySlider');
-        const timePct = slider ? parseInt(slider.value, 10) : 50;
+        const timePct = slider ? parseInt(slider.value, 10) : 0;
         const safetyAlpha = 1.0 - (timePct / 100.0);
         console.log(`Slider at ${timePct}% time => safety_alpha=${safetyAlpha.toFixed(2)}`);
 
