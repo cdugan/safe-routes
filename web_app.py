@@ -532,6 +532,11 @@ def api_routes():
         if not start_input or not end_input:
             return jsonify({"status": "error", "message": "Missing start or end location"}), 400
         
+        # Helper function to check if coordinates are within bounds
+        def is_within_bounds(lat, lon):
+            north, south, east, west = BBOX
+            return south <= lat <= north and west <= lon <= east
+        
         # Parse coordinates if they're provided as [lat, lon]
         if isinstance(start_input, list) and len(start_input) == 2:
             start_lat, start_lon = start_input
@@ -541,6 +546,13 @@ def api_routes():
         else:
             return jsonify({"status": "error", "message": "Invalid start format"}), 400
         
+        # Validate start coordinates are within bounds
+        if not is_within_bounds(start_lat, start_lon):
+            return jsonify({
+                "status": "error", 
+                "message": f"Start location ({start_lat:.4f}, {start_lon:.4f}) is outside the service area. Please select a location within bounds."
+            }), 400
+        
         if isinstance(end_input, list) and len(end_input) == 2:
             end_lat, end_lon = end_input
         elif isinstance(end_input, str):
@@ -548,6 +560,13 @@ def api_routes():
             end_lat, end_lon = geocode_address(end_input)
         else:
             return jsonify({"status": "error", "message": "Invalid end format"}), 400
+        
+        # Validate end coordinates are within bounds
+        if not is_within_bounds(end_lat, end_lon):
+            return jsonify({
+                "status": "error", 
+                "message": f"End location ({end_lat:.4f}, {end_lon:.4f}) is outside the service area. Please select a location within bounds."
+            }), 400
         
         # Get graph
         G, lights = _get_graph()
@@ -559,62 +578,23 @@ def api_routes():
         
         print(f"Start node: {start_node}, End node: {end_node}")
         
-        # Compute fastest route (try OSRM first)
+        # Initialize data structures for two routes
         fastest_route = None
         fastest_data = {
             "nodes": [],
             "distance_m": 0,
             "travel_time_s": 0,
-            "avg_speed_kmh": 0
+            "avg_speed_kmh": 0,
+            "safety_score": 0
         }
         
-        # Extract safety_alpha from request
-        safety_alpha = 0.5
-        try:
-            safety_alpha = float(data.get('safety_alpha', safety_alpha))
-        except Exception:
-            safety_alpha = 0.5
-        
-        # Initialize safest_data structure
+        safest_route = None
         safest_data = {
             "nodes": [],
             "distance_m": 0,
             "travel_time_s": 0,
-            "safety_score": 0,
-            "alpha": safety_alpha
+            "safety_score": 0
         }
-        
-        print("Computing fastest route...")
-        osrm_result = get_osrm_route(start_lat, start_lon, end_lat, end_lon)
-        
-        if osrm_result:
-            route_coords, osrm_distance, osrm_duration = osrm_result
-            fastest_route = snap_osrm_route_to_graph(G, route_coords)
-            
-            if fastest_route:
-                fastest_data["nodes"] = fastest_route
-                fastest_data["distance_m"] = sum(
-                    G.edges[fastest_route[i], fastest_route[i+1], 0].get('length', 0)
-                    for i in range(len(fastest_route) - 1)
-                )
-                fastest_data["travel_time_s"] = sum(
-                    G.edges[fastest_route[i], fastest_route[i+1], 0].get('travel_time', 0)
-                    for i in range(len(fastest_route) - 1)
-                )
-                if fastest_data["travel_time_s"] > 0:
-                    fastest_data["avg_speed_kmh"] = (fastest_data["distance_m"] / fastest_data["travel_time_s"]) * 3.6
-                # Aggregate safety score for fastest route as well
-                fastest_data["safety_score"] = sum(
-                    (
-                        G.edges[fastest_route[i], fastest_route[i+1], 0].get('safety_score', 100)
-                        * (G.edges[fastest_route[i], fastest_route[i+1], 0].get('length', 1) / 1000.0)
-                    )
-                    for i in range(len(fastest_route) - 1)
-                )
-        
-        # Compute fastest and safest routes using unified weight function
-        # When safety_alpha=0, safest will match fastest (pure time optimization)
-        # When safety_alpha=1, only safety matters (ignores time)
         
         # Helper: normalize edge data from MultiGraph (may be nested dict) to flat dict
         def normalize_edge_data(data_attr):
@@ -630,127 +610,87 @@ def api_routes():
                     return data_attr
             return {}
         
-        print(f"Computing routes with safety_alpha={safety_alpha}...")
-        fastest_route = None # TESTING
+        print("Computing fastest and safest routes...")
         try:
-            # If OSRM didn't provide a fastest route, compute it with NetworkX
-            if not fastest_route:
-                # Precompute normalization factors for consistent weighting across both route types
-                times = [d.get('travel_time', 0) for u, v, k, d in G.edges(keys=True, data=True)]
-                lengths = [d.get('length', 1) for u, v, k, d in G.edges(keys=True, data=True)]
-                safeties = [d.get('safety_score', 100) for u, v, k, d in G.edges(keys=True, data=True)]
-                max_time = max(times) if times else 1.0
-                max_length = max(lengths) if lengths else 1.0
-                max_safety = max(safeties) if safeties else 100.0
-                
-                print(f"  max_time={max_time:.1f}s, max_length={max_length:.0f}m, max_safety={max_safety:.1f}")
-
-                def fastest_weight(u, v, data_attr):
-                    data = normalize_edge_data(data_attr)
-                    t = (data.get('travel_time', 0) / max_time) if max_time > 0 else 0
-                    return t  # Pure time, no safety component
-                
-                print("  Computing fastest route with NetworkX (pure time)...")
-                try:
-                    fastest_route = nx.shortest_path(G, start_node, end_node, weight=fastest_weight)
-                    fastest_data["nodes"] = fastest_route
-                    fastest_data["distance_m"] = sum(
-                        G.edges[fastest_route[i], fastest_route[i+1], 0].get('length', 0)
-                        for i in range(len(fastest_route) - 1)
-                    )
-                    fastest_data["travel_time_s"] = sum(
-                        G.edges[fastest_route[i], fastest_route[i+1], 0].get('travel_time', 0)
-                        for i in range(len(fastest_route) - 1)
-                    )
-                    if fastest_data["travel_time_s"] > 0:
-                        fastest_data["avg_speed_kmh"] = (fastest_data["distance_m"] / fastest_data["travel_time_s"]) * 3.6
-                    fastest_data["safety_score"] = sum(
-                        (
-                            G.edges[fastest_route[i], fastest_route[i+1], 0].get('safety_score', 100)
-                            * (G.edges[fastest_route[i], fastest_route[i+1], 0].get('length', 1) / 1000.0)
-                        )
-                        for i in range(len(fastest_route) - 1)
-                    )
-                    print(f"  Fastest route: {len(fastest_route)} nodes, {fastest_data['travel_time_s']:.0f}s, safety_score={fastest_data['safety_score']:.1f}")
-                except nx.NetworkXNoPath:
-                    print("  No fastest path found!")
-            else:
-                print(f"  Using OSRM fastest route: {len(fastest_route)} nodes")
+            # Precompute normalization factors for consistent weighting
+            times = [d.get('travel_time', 0) for u, v, k, d in G.edges(keys=True, data=True)]
+            lengths = [d.get('length', 1) for u, v, k, d in G.edges(keys=True, data=True)]
+            safeties = [d.get('safety_score', 100) for u, v, k, d in G.edges(keys=True, data=True)]
+            max_time = max(times) if times else 1.0
+            max_length = max(lengths) if lengths else 1.0
+            max_safety = max(safeties) if safeties else 100.0
             
-            # Now compute safest route with user's safety_alpha value
-            # Precompute normalization factors if not already done
-            if not fastest_route or 'fastest_weight' not in locals():
-                times = [d.get('travel_time', 0) for u, v, k, d in G.edges(keys=True, data=True)]
-                lengths = [d.get('length', 1) for u, v, k, d in G.edges(keys=True, data=True)]
-                safeties = [d.get('safety_score', 100) for u, v, k, d in G.edges(keys=True, data=True)]
-                max_time = max(times) if times else 1.0
-                max_length = max(lengths) if lengths else 1.0
-                max_safety = max(safeties) if safeties else 100.0
-                print(f"  max_time={max_time:.1f}s, max_length={max_length:.0f}m, max_safety={max_safety:.1f}")
-            
-            # Compute SAFEST route: use combined_weight with user's safety_alpha value
-            print(f"  Computing safest route (alpha={safety_alpha})...")
+            print(f"  max_time={max_time:.1f}s, max_length={max_length:.0f}m, max_safety={max_safety:.1f}")
 
-            def combined_weight(u, v, data_attr):
+            def fastest_weight(u, v, data_attr):
                 data = normalize_edge_data(data_attr)
-                # time component normalized by global max
-                time = data.get('travel_time', 0)
-                t = (time / max_time) if max_time > 0 else 0
-                # safety component scaled by segment length to represent danger exposure
+                t = (data.get('travel_time', 0) / max_time) if max_time > 0 else 0
+                return t  # Pure time, no safety component
+            
+            def safest_weight(u, v, data_attr):
+                data = normalize_edge_data(data_attr)
                 length = data.get('length', 1)
                 s_raw = data.get('safety_score', 100)
                 s = (s_raw * length) / (max_safety * max_length) if (max_safety > 0 and max_length > 0) else 0
-                out = (1.0 - safety_alpha) * t + safety_alpha * s
-
-                return out
-            # Use Dijkstra with custom weight function
-            safest_route = nx.shortest_path(G, start_node, end_node, weight=combined_weight)
-
-            safest_data["nodes"] = safest_route
-            safest_data["distance_m"] = sum(
-                G.edges[safest_route[i], safest_route[i+1], 0].get('length', 0)
-                for i in range(len(safest_route) - 1)
-            )
-            safest_data["travel_time_s"] = sum(
-                G.edges[safest_route[i], safest_route[i+1], 0].get('travel_time', 0)
-                for i in range(len(safest_route) - 1)
-            )
-            # Cumulative danger exposure: safety_score scaled by segment length (km)
-            safest_data["safety_score"] = sum(
-                (
-                    G.edges[safest_route[i], safest_route[i+1], 0].get('safety_score', 100)
-                    * (G.edges[safest_route[i], safest_route[i+1], 0].get('length', 1) / 1000.0)
-                )
-                for i in range(len(safest_route) - 1)
-            )
-            # Debug: total combined_weight along safest route
+                return s  # Pure safety, no time component
+            
+            # Compute fastest route
+            print("  Computing fastest route (pure time)...")
             try:
-                total_combined_weight = sum(
-                    combined_weight(
-                        safest_route[i],
-                        safest_route[i + 1],
-                        G.edges[safest_route[i], safest_route[i + 1], 0]
+                fastest_route = nx.shortest_path(G, start_node, end_node, weight=fastest_weight)
+                fastest_data["nodes"] = fastest_route
+                fastest_data["distance_m"] = sum(
+                    G.edges[fastest_route[i], fastest_route[i+1], 0].get('length', 0)
+                    for i in range(len(fastest_route) - 1)
+                )
+                fastest_data["travel_time_s"] = sum(
+                    G.edges[fastest_route[i], fastest_route[i+1], 0].get('travel_time', 0)
+                    for i in range(len(fastest_route) - 1)
+                )
+                if fastest_data["travel_time_s"] > 0:
+                    fastest_data["avg_speed_kmh"] = (fastest_data["distance_m"] / fastest_data["travel_time_s"]) * 3.6
+                fastest_data["safety_score"] = sum(
+                    (
+                        G.edges[fastest_route[i], fastest_route[i+1], 0].get('safety_score', 100)
+                        * (G.edges[fastest_route[i], fastest_route[i+1], 0].get('length', 1) / 1000.0)
+                    )
+                    for i in range(len(fastest_route) - 1)
+                )
+                print(f"  Fastest route: {len(fastest_route)} nodes, {fastest_data['travel_time_s']:.0f}s, safety_score={fastest_data['safety_score']:.1f}")
+            except nx.NetworkXNoPath:
+                print("  No fastest path found!")
+            
+            # Compute safest route
+            print("  Computing safest route (pure safety)...")
+            try:
+                safest_route = nx.shortest_path(G, start_node, end_node, weight=safest_weight)
+                safest_data["nodes"] = safest_route
+                safest_data["distance_m"] = sum(
+                    G.edges[safest_route[i], safest_route[i+1], 0].get('length', 0)
+                    for i in range(len(safest_route) - 1)
+                )
+                safest_data["travel_time_s"] = sum(
+                    G.edges[safest_route[i], safest_route[i+1], 0].get('travel_time', 0)
+                    for i in range(len(safest_route) - 1)
+                )
+                safest_data["safety_score"] = sum(
+                    (
+                        G.edges[safest_route[i], safest_route[i+1], 0].get('safety_score', 100)
+                        * (G.edges[safest_route[i], safest_route[i+1], 0].get('length', 1) / 1000.0)
                     )
                     for i in range(len(safest_route) - 1)
                 )
-                print(f"  Safest route combined_weight total: {total_combined_weight:.4f}")
-            except Exception as dbg_err:
-                print(f"  ⚠️ Could not compute combined_weight total: {dbg_err}")
-            print(f"  Safest route: {len(safest_route)} nodes, {safest_data['travel_time_s']:.0f}s, safety_score={safest_data['safety_score']:.1f}")
-            
-            # When safety_alpha=0.0, safest and fastest should be identical
-            if abs(safety_alpha - 0.0) < 0.01 and fastest_route and safest_route:
-                if fastest_route == safest_route:
-                    print(f"  ✓ Routes match when alpha≈0 (pure time)")
-                else:
-                    print(f"  ⚠️ Routes differ when alpha≈0 (should match): fastest={len(fastest_route)} nodes, safest={len(safest_route)} nodes")
+                print(f"  Safest route: {len(safest_route)} nodes, {safest_data['travel_time_s']:.0f}s, safety_score={safest_data['safety_score']:.1f}")
+            except nx.NetworkXNoPath:
+                print("  No safest path found!")
 
         except nx.NetworkXNoPath:
-            print("  No safe path found!")
+            print("  No path found!")
+        
         # Convert routes to GeoJSON
         fastest_geojson = route_to_geojson(fastest_route, G, "fastest") if fastest_route else None
         safest_geojson = route_to_geojson(safest_route, G, "safest") if safest_route else None
-        print("Safest route time s:", safest_data.get("travel_time_s"))
+        
         response = {
             "status": "success",
             "start": {"lat": start_lat, "lon": start_lon},

@@ -8,8 +8,15 @@ let endMarker;
 let fastestRouteLayer;
 let safestRouteLayer; // will be a LayerGroup containing halo + route
 let lightsLayer;
+let boundaryBox; // boundary rectangle layer
 let mapClickMode = null; // 'start' or 'end' for map picking mode
-const BBOX = [35.42, 35.28, -82.40, -82.55]; // [north, south, east, west]
+const BBOX = window.APP_BBOX || [35.42, 35.28, -82.40, -82.55]; // [north, south, east, west] - fallback to Hendersonville if not set
+
+// Check if coordinates are within bounds
+function isWithinBounds(lat, lon) {
+    const [north, south, east, west] = BBOX;
+    return lat >= south && lat <= north && lon >= west && lon <= east;
+}
 
 // Initialize map
 function initMap() {
@@ -31,6 +38,18 @@ function initMap() {
         [north, east]
     );
     map.fitBounds(bounds);
+    
+    // Add boundary box visualization
+    boundaryBox = L.rectangle(
+        [[south, west], [north, east]],
+        {
+            color: '#ff7800',
+            weight: 3,
+            fillOpacity: 0,
+            dashArray: '10, 10',
+            interactive: false
+        }
+    ).addTo(map);
     
     // Add click handler for map-based point selection
     map.on('click', function(e) {
@@ -227,8 +246,17 @@ function getSafetyColor(score) {
 }
 
 // Set start point
-function setStartPoint(lat, lon) {
-    document.getElementById('startInput').value = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+function setStartPoint(lat, lon, preserveInput = false) {
+    // Validate bounds
+    if (!isWithinBounds(lat, lon)) {
+        showError(`Start point (${lat.toFixed(4)}, ${lon.toFixed(4)}) is outside the service area. Please select a location within the boundary.`);
+        return false;
+    }
+    
+    // Only update input box if not preserving original text
+    if (!preserveInput) {
+        document.getElementById('startInput').value = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+    }
     
     if (startMarker) {
         map.removeLayer(startMarker);
@@ -241,11 +269,21 @@ function setStartPoint(lat, lon) {
             iconAnchor: [16, 32]
         })
     }).addTo(map).bindPopup('Start Point');
+    return true;
 }
 
 // Set end point
-function setEndPoint(lat, lon) {
-    document.getElementById('endInput').value = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+function setEndPoint(lat, lon, preserveInput = false) {
+    // Validate bounds
+    if (!isWithinBounds(lat, lon)) {
+        showError(`End point (${lat.toFixed(4)}, ${lon.toFixed(4)}) is outside the service area. Please select a location within the boundary.`);
+        return false;
+    }
+    
+    // Only update input box if not preserving original text
+    if (!preserveInput) {
+        document.getElementById('endInput').value = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+    }
     
     if (endMarker) {
         map.removeLayer(endMarker);
@@ -258,6 +296,7 @@ function setEndPoint(lat, lon) {
             iconAnchor: [16, 32]
         })
     }).addTo(map).bindPopup('End Point');
+    return true;
 }
 
 // Create simple marker icons using SVG
@@ -308,12 +347,6 @@ async function computeRoutes() {
         // Parse coordinates from input if they look like coordinates
         const start = parseInput(startInput);
         const end = parseInput(endInput);
-        
-        // Slider 0=safety, 100=time, so safety_alpha = 1 - (time_pct / 100)
-        const slider = document.getElementById('safetySlider');
-        const timePct = slider ? parseInt(slider.value, 10) : 0;
-        const safetyAlpha = 1.0 - (timePct / 100.0);
-        console.log(`Slider at ${timePct}% time => safety_alpha=${safetyAlpha.toFixed(2)}`);
 
         const response = await fetch('/api/routes', {
             method: 'POST',
@@ -322,26 +355,30 @@ async function computeRoutes() {
             },
             body: JSON.stringify({
                 start: start,
-                end: end,
-                safety_alpha: safetyAlpha
+                end: end
             })
         });
         
         const data = await response.json();
         
         if (data.status === 'success') {
-            // Set markers
-            setStartPoint(data.start.lat, data.start.lon);
-            setEndPoint(data.end.lat, data.end.lon);
+            // Set markers (they have bounds validation built in)
+            // Pass true to preserve original input text (address or coordinates)
+            const startSet = setStartPoint(data.start.lat, data.start.lon, true);
+            const endSet = setEndPoint(data.end.lat, data.end.lon, true);
+            
+            // If markers couldn't be set due to bounds, stop here
+            if (!startSet || !endSet) {
+                return;
+            }
             
             // Remove old route layers
             if (fastestRouteLayer) map.removeLayer(fastestRouteLayer);
             if (safestRouteLayer) map.removeLayer(safestRouteLayer);
             
-            // Add safest route first with a white halo so overlapping is visible through dashes
+            // Add routes with different colors
+            // Safest route: cyan, solid
             if (data.safest.geojson) {
-                // remove existing
-                if (safestRouteLayer) map.removeLayer(safestRouteLayer);
                 const halo = L.geoJSON(data.safest.geojson, {
                     style: {
                         color: '#ffffff',
@@ -359,9 +396,8 @@ async function computeRoutes() {
                 safestRouteLayer = L.layerGroup([halo, cyanLine]).addTo(map);
             }
 
-            // Add fastest route on top with dashed magenta so gaps reveal cyan beneath
+            // Fastest route: magenta, dashed
             if (data.fastest.geojson) {
-                if (fastestRouteLayer) map.removeLayer(fastestRouteLayer);
                 fastestRouteLayer = L.geoJSON(data.fastest.geojson, {
                     style: {
                         color: '#FF00FF',
@@ -375,7 +411,7 @@ async function computeRoutes() {
             // Display results
             displayResults(data.fastest.data, data.safest.data);
             
-            // Fit map to show both routes
+            // Fit map to show all routes
             if (fastestRouteLayer || safestRouteLayer || startMarker || endMarker) {
                 // gather all candidate layers
                 const candidates = [];
@@ -461,24 +497,21 @@ function displayResults(fastestData, safestData) {
     // Fastest route
     if (fastestData.distance_m > 0) {
         document.getElementById('fastestDistance').textContent = 
-            (fastestData.distance_m / 1000).toFixed(2) + ' km';
+            (fastestData.distance_m / 1609.34).toFixed(2) + ' mi';
         document.getElementById('fastestTime').textContent = 
             formatTime(fastestData.travel_time_s);
-        document.getElementById('fastestSpeed').textContent = 
-            fastestData.avg_speed_kmh.toFixed(1) + ' km/h';
         document.getElementById('fastestScore').textContent =
             (fastestData.safety_score ? fastestData.safety_score.toFixed(1) : 'N/A');
     } else {
         document.getElementById('fastestDistance').textContent = 'N/A';
         document.getElementById('fastestTime').textContent = 'N/A';
-        document.getElementById('fastestSpeed').textContent = 'N/A';
         document.getElementById('fastestScore').textContent = 'N/A';
     }
     
     // Safest route
     if (safestData.distance_m > 0) {
         document.getElementById('safestDistance').textContent = 
-            (safestData.distance_m / 1000).toFixed(2) + ' km';
+            (safestData.distance_m / 1609.34).toFixed(2) + ' mi';
         document.getElementById('safestTime').textContent = 
             formatTime(safestData.travel_time_s);
         document.getElementById('safestScore').textContent = 
@@ -547,21 +580,6 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Compute button
     document.getElementById('computeBtn').addEventListener('click', computeRoutes);
-
-    // Safety slider
-    const slider = document.getElementById('safetySlider');
-    if (slider) {
-        const lbl = document.getElementById('safetyLabel');
-        slider.addEventListener('input', function() {
-            const timePct = parseInt(slider.value, 10);
-            const safetyPct = 100 - timePct;
-            lbl.textContent = `T:${timePct}% S:${safetyPct}%`;
-        });
-        // Initialize label
-        const initTimePct = parseInt(slider.value, 10);
-        const initSafetyPct = 100 - initTimePct;
-        document.getElementById('safetyLabel').textContent = `T:${initTimePct}% S:${initSafetyPct}%`;
-    }
     
     // Clear button
     document.getElementById('clearBtn').addEventListener('click', clearResults);

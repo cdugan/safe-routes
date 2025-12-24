@@ -42,16 +42,6 @@
                     
                     <button id="computeBtn" class="primary-btn">🚗 Compare Routes</button>
                     
-                    <div class="input-group">
-                        <label for="safetySlider">Safety vs Time</label>
-                        <input type="range" id="safetySlider" min="0" max="100" value="0" />
-                        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;gap:8px;">
-                            <span style="flex:1;text-align:left;">Time</span>
-                            <strong id="safetyLabel" style="flex:0 0 auto;min-width:48px;text-align:center;">0%</strong>
-                            <span style="flex:1;text-align:right;">Safety</span>
-                        </div>
-                    </div>
-                    
                     <div id="loadingIndicator" class="loading" style="display: none;">
                         Computing routes...
                     </div>
@@ -69,10 +59,6 @@
                             <div class="metric">
                                 <span class="label">Time:</span>
                                 <span class="value" id="fastestTime">-</span>
-                            </div>
-                            <div class="metric">
-                                <span class="label">Avg Speed:</span>
-                                <span class="value" id="fastestSpeed">-</span>
                             </div>
                             <div class="metric">
                                 <span class="label">Danger Score:</span>
@@ -98,43 +84,6 @@
                         
                         <button id="clearBtn" class="secondary-btn">Clear Results</button>
                     </div>
-                    
-                    <!-- Legend -->
-                    <div class="legend">
-                        <h4>Map Legend</h4>
-                        <div class="legend-item">
-                            <div class="legend-color" style="background: #0066ff;"></div>
-                            <span>Safe Roads</span>
-                        </div>
-                        <div class="legend-item">
-                            <div class="legend-color" style="background: #ffcc00;"></div>
-                            <span>Medium Risk</span>
-                        </div>
-                        <div class="legend-item">
-                            <div class="legend-color" style="background: #ff0000;"></div>
-                            <span>High Risk</span>
-                        </div>
-                        <div class="legend-item">
-                            <div class="legend-color" style="background: #FF00FF;"></div>
-                            <span>Fastest Route (magenta, dashed)</span>
-                        </div>
-                        <div class="legend-item">
-                            <div class="legend-color" style="background: #00FFFF;"></div>
-                            <span>Safest Route (cyan)</span>
-                        </div>
-                        <div class="legend-item">
-                            <div class="legend-color" style="background: #ffff00;"></div>
-                            <span>Streetlights</span>
-                        </div>
-                        <div class="legend-item">
-                            <div class="legend-color" style="background: #00ff00; border: 2px solid white;"></div>
-                            <span>Start Point</span>
-                        </div>
-                        <div class="legend-item">
-                            <div class="legend-color" style="background: #a200ffff; border: 2px solid white;"></div>
-                            <span>End Point</span>
-                        </div>
-                    </div>
                 </div>
             </aside>
 
@@ -147,6 +96,12 @@
 
     <!-- Leaflet JS -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+    
+    <!-- Pass config from backend to frontend -->
+    <script>
+        // Set BBOX from backend configuration
+        window.APP_BBOX = {{ bbox | tojson }};
+    </script>
     
     <!-- Custom JS -->
     <script src="{{ url_for('static', filename='app.js') }}"></script>

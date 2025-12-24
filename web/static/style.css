@@ -196,13 +196,13 @@ body {
 }
 
 .fastest-result {
-    background: #fff3cd;
-    border-left: 4px solid #ffc107;
+    background: #ffe0ff;
+    border-left: 4px solid #FF00FF;
 }
 
 .safest-result {
-    background: #cfe2ff;
-    border-left: 4px solid #0d6efd;
+    background: #e0ffff;
+    border-left: 4px solid #00FFFF;
 }
 
 .metric {

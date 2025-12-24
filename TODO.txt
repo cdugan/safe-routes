@@ -1,19 +1,6 @@
-- Add a boundary box around the loaded map to show what's in/out of bounds.
-- If an inputted lat/long or address is outside the bounds, it should notify the user that it's 
-    out of bounds and wait for another entry.
-- if an address is entered, after pressing "Compare routes", it will be converted to latitude/longitude in the 
-    text box. We should leave it as whatever form it was in originally.
-- If address was entered, keep address in the search box
-- Make fastest route more obvious with color - match stats to route color
-- no scrolling if possible?
 - what does safety score mean?
-- safety score numbers are reversed
-- end point different color from high risk
-- Remove the slider, and instead just compute a fastest route, safest route, and balanced route (50% each.) 
-- Remove the legend
-- test with raleigh area
 
-- layers option to see different safety data
+- layers option to see different safety data?
 
 - Address autocomplete?
 
