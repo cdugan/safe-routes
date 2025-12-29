@@ -42,6 +42,19 @@
                     
                     <button id="computeBtn" class="primary-btn">🚗 Compare Routes</button>
                     
+                    <!-- Map Layers -->
+                    <div class="map-layers">
+                        <h3>Map Layers</h3>
+                        <div class="layer-toggle">
+                            <input type="checkbox" id="roadSafetyToggle" checked>
+                            <label for="roadSafetyToggle">🚧 Road Safety Data</label>
+                        </div>
+                        <div class="layer-toggle">
+                            <input type="checkbox" id="streetlightsToggle" checked>
+                            <label for="streetlightsToggle">💡 Streetlights</label>
+                        </div>
+                    </div>
+                    
                     <div id="loadingIndicator" class="loading" style="display: none;">
                         Computing routes...
                     </div>

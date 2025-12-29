@@ -160,6 +160,43 @@ body {
     animation: pulse 1.5s ease-in-out infinite;
 }
 
+/* Map Layers */
+.map-layers {
+    background: #f9f9f9;
+    padding: 15px;
+    border-radius: 8px;
+    margin-bottom: 15px;
+}
+
+.map-layers h3 {
+    font-size: 14px;
+    margin-bottom: 10px;
+    color: #333;
+    font-weight: 600;
+}
+
+.layer-toggle {
+    display: flex;
+    align-items: center;
+    margin-bottom: 8px;
+    cursor: pointer;
+}
+
+.layer-toggle input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    margin-right: 8px;
+    cursor: pointer;
+}
+
+.layer-toggle label {
+    font-size: 13px;
+    color: #555;
+    cursor: pointer;
+    margin: 0;
+    user-select: none;
+}
+
 @keyframes pulse {
     0%, 100% {
         opacity: 1;
@@ -337,4 +374,43 @@ body {
     color: #c62828;
     font-size: 13px;
     margin-bottom: 15px;
+}
+
+/* Safety Legend */
+.safety-legend {
+    margin-top: 15px;
+    padding: 12px;
+    background: #f9f9f9;
+    border-radius: 6px;
+    border: 1px solid #e0e0e0;
+}
+
+.safety-legend h4 {
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 10px;
+    color: #555;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    margin-bottom: 6px;
+    font-size: 12px;
+}
+
+.legend-color {
+    width: 30px;
+    height: 14px;
+    border-radius: 3px;
+    margin-right: 8px;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    flex-shrink: 0;
+}
+
+.legend-label {
+    color: #555;
+    line-height: 1.2;
 }

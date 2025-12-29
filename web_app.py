@@ -163,7 +163,6 @@ def _build_lite_geojson_cache():
 
         length_val = data.get('length', 0)
         safety_val = data.get('safety_score', 100)
-        safety_per_len = (safety_val / length_val) if length_val else None
 
         features.append({
             'type': 'Feature',
@@ -176,8 +175,7 @@ def _build_lite_geojson_cache():
                 'highway_risk': data.get('highway_risk', 1),
                 'highway_tag': data.get('highway_tag', None),
                 'land_risk': data.get('land_risk', 0.6),
-                'land_label': data.get('land_label', 'Unknown'),
-                'safety_per_length': safety_per_len
+                'land_label': data.get('land_label', 'Unknown')
             }
         })
         i += 1
@@ -252,7 +250,6 @@ def graph_to_geojson(G):
 
             length_val = data.get('length', 0)
             safety_val = data.get('safety_score', 100)
-            safety_per_len = (safety_val / length_val) if length_val else None
 
             features.append({
                 "type": "Feature",
@@ -269,7 +266,6 @@ def graph_to_geojson(G):
                     "highway_tag": data.get('highway_tag', None),
                     "land_risk": data.get('land_risk', 0.6),
                     "land_label": data.get('land_label', 'Unknown'),
-                    "safety_per_length": safety_per_len,
                     "travel_time": data.get('travel_time', 0),
                     "length": length_val,
                     "speed_kph": data.get('speed_kph', 40),
@@ -434,7 +430,6 @@ def api_graph_data_lite():
 
             length_val = data.get('length', 0)
             safety_val = data.get('safety_score', 100)
-            safety_per_len = (safety_val / length_val) if length_val else None
 
             features.append({
                 'type': 'Feature',
@@ -447,8 +442,7 @@ def api_graph_data_lite():
                     'highway_risk': data.get('highway_risk', 1),
                     'highway_tag': data.get('highway_tag', None),
                     'land_risk': data.get('land_risk', 0.6),
-                    'land_label': data.get('land_label', 'Unknown'),
-                    'safety_per_length': safety_per_len
+                    'land_label': data.get('land_label', 'Unknown')
                 }
             })
             i += 1

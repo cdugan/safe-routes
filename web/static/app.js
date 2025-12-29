@@ -96,8 +96,8 @@ async function loadGraphData() {
                         const color = getSafetyColor(safetyScore);
                         return {
                             color: color,
-                            weight: 2,
-                            opacity: 0.7
+                            weight: 2.5,
+                            opacity: 0.8
                         };
                     },
                     onEachFeature: function(feature, layer) {
@@ -110,13 +110,10 @@ async function loadGraphData() {
                         const highwayTag = props.highway_tag || 'unknown';
                         const landRisk = props.land_risk !== undefined ? props.land_risk.toFixed(3) : 'N/A';
                         const landLabel = props.land_label || 'Unknown';
-                        const safetyPerLen = (props.safety_per_length !== undefined && props.safety_per_length !== null)
-                            ? props.safety_per_length.toFixed(6)
-                            : 'N/A';
                         let popup = `<b>${props.name || 'Unknown Road'}</b><br>`;
                         popup += `Danger Score: ${safetyScore}<br>`;
                         if (props.length !== undefined) {
-                            popup += `Length: ${(props.length / 1000).toFixed(2)} km<br>`;
+                            popup += `Length: ${(props.length / 1609.34).toFixed(2)} mi<br>`;
                         }
                         if (props.travel_time !== undefined) {
                             popup += `Travel Time: ${props.travel_time.toFixed(0)} s<br>`;
@@ -127,12 +124,11 @@ async function loadGraphData() {
                         popup += `Highway Risk (0 safest): ${highwayRisk}<br>`;
                         popup += `Highway Tag: ${highwayTag}<br>`;
                         popup += `Land Risk (0 safest): ${landRisk}<br>`;
-                        popup += `Land Use: ${landLabel}<br>`;
-                        popup += `Danger per Length: ${safetyPerLen}`;
+                        popup += `Land Use: ${landLabel}`;
                         layer.bindPopup(popup);
                     }
                 }).addTo(map);
-                console.log('Lite graph layer added successfully');
+                console.log('Lite graph layer added to map');
             } catch (layerErr) {
                 console.error('Error creating lite graph layer:', layerErr);
                 throw layerErr;
@@ -173,7 +169,7 @@ async function loadGraphData() {
                         style: function(feature) {
                             const safetyScore = feature.properties.safety_score || 100;
                             const color = getSafetyColor(safetyScore);
-                            return { color: color, weight: 2, opacity: 0.85 };
+                            return { color: color, weight: 2.5, opacity: 0.85 };
                         },
                         onEachFeature: function(feature, layer) {
                             const props = feature.properties;
@@ -185,13 +181,10 @@ async function loadGraphData() {
                             const highwayTag = props.highway_tag || 'unknown';
                             const landRisk = props.land_risk !== undefined ? props.land_risk.toFixed(3) : 'N/A';
                             const landLabel = props.land_label || 'Unknown';
-                            const safetyPerLen = (props.safety_per_length !== undefined && props.safety_per_length !== null)
-                                ? props.safety_per_length.toFixed(6)
-                                : 'N/A';
                             let popup = `<b>${props.name || 'Unknown Road'}</b><br>`;
                             popup += `Danger Score: ${safetyScore}<br>`;
                             if (props.length !== undefined) {
-                                popup += `Length: ${(props.length / 1000).toFixed(2)} km<br>`;
+                                popup += `Length: ${(props.length / 1609.34).toFixed(2)} mi<br>`;
                             }
                             if (props.travel_time !== undefined) {
                                 popup += `Travel Time: ${props.travel_time.toFixed(0)} s<br>`;
@@ -202,8 +195,7 @@ async function loadGraphData() {
                             popup += `Highway Risk (0 safest): ${highwayRisk}<br>`;
                             popup += `Highway Tag: ${highwayTag}<br>`;
                             popup += `Land Risk (0 safest): ${landRisk}<br>`;
-                            popup += `Land Use: ${landLabel}<br>`;
-                            popup += `Danger per Length: ${safetyPerLen}`;
+                            popup += `Land Use: ${landLabel}`;
                             layer.bindPopup(popup);
                         }
                     }).addTo(map);
@@ -229,19 +221,28 @@ async function loadGraphData() {
     }
 }
 
-// Get color based on safety score (blue = safe, red = dangerous)
+// Get color based on safety score with 6 divisions (lower is safer)
 function getSafetyColor(score) {
-    // score: 0-150 (lower is safer)
-    // 0-50: blue (safe)
-    // 50-100: yellow (medium)
-    // 100-150: red (dangerous)
+    // score: 0-180 (lower is safer)
+    // 0-30: dark blue (very safe)
+    // 30-60: light blue (safe)
+    // 60-90: dark orange (moderately dangerous)
+    // 90-120: light orange (dangerous)
+    // 120-150: dark red (very dangerous)
+    // 150+: bright red (extremely dangerous)
     
-    if (score <= 50) {
-        return '#0066ff'; // Blue
-    } else if (score <= 100) {
-        return '#ffcc00'; // Yellow
+    if (score <= 30) {
+        return '#0047AB'; // Dark blue (very safe)
+    } else if (score <= 60) {
+        return '#4A90E2'; // Light blue (safe)
+    } else if (score <= 90) {
+        return '#FF8C00'; // Dark orange (moderately dangerous)
+    } else if (score <= 120) {
+        return '#FFB347'; // Light orange (dangerous)
+    } else if (score <= 150) {
+        return '#CC0000'; // Dark red (very dangerous)
     } else {
-        return '#ff0000'; // Red
+        return '#FF0000'; // Bright red (extremely dangerous)
     }
 }
 
@@ -580,6 +581,32 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Compute button
     document.getElementById('computeBtn').addEventListener('click', computeRoutes);
+    
+    // Road safety toggle
+    document.getElementById('roadSafetyToggle').addEventListener('change', function() {
+        if (this.checked) {
+            if (graphLayer) {
+                map.addLayer(graphLayer);
+            }
+        } else {
+            if (graphLayer) {
+                map.removeLayer(graphLayer);
+            }
+        }
+    });
+    
+    // Streetlights toggle
+    document.getElementById('streetlightsToggle').addEventListener('change', function() {
+        if (this.checked) {
+            if (lightsLayer) {
+                map.addLayer(lightsLayer);
+            }
+        } else {
+            if (lightsLayer) {
+                map.removeLayer(lightsLayer);
+            }
+        }
+    });
     
     // Clear button
     document.getElementById('clearBtn').addEventListener('click', clearResults);
