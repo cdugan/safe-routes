@@ -414,7 +414,7 @@ def build_safe_graph(bbox):
         # Curvature score (relative to straight line)
         sinuosity_ratio = get_sinuosity(u, v, G_proj)
         curve_score = max(0.0, sinuosity_ratio - 1.0)
-
+        #
         # Darkness score from lights per meter
         length_m = data.get('length', 0.0)
         if not length_m or length_m <= 0:
